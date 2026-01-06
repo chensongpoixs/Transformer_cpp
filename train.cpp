@@ -125,22 +125,27 @@ static void print_progress_bar(int epoch, int total_epochs,
     std::ostringstream batch_oss;
     batch_oss << (batch_idx + 1) << "/" << total_batches;
     
-    // 格式化tokens数量（使用K/M/G等单位）
+    // 计算每秒处理的token数量
+    double tokens_per_sec = (elapsed_time > 0.0) ? (static_cast<double>(current_tokens) / elapsed_time) : 0.0;
+    
+    // 格式化每秒tokens数量（使用K/M/G等单位，添加/s后缀）
     std::string tokens_str;
-    if (current_tokens >= 1000000000) {
+    if (tokens_per_sec >= 1000000000) {
         std::ostringstream t_oss;
-        t_oss << std::fixed << std::setprecision(1) << (current_tokens / 1000000000.0) << "G";
+        t_oss << std::fixed << std::setprecision(1) << (tokens_per_sec / 1000000000.0) << "G/s";
         tokens_str = t_oss.str();
-    } else if (current_tokens >= 1000000) {
+    } else if (tokens_per_sec >= 1000000) {
         std::ostringstream t_oss;
-        t_oss << std::fixed << std::setprecision(1) << (current_tokens / 1000000.0) << "M";
+        t_oss << std::fixed << std::setprecision(1) << (tokens_per_sec / 1000000.0) << "M/s";
         tokens_str = t_oss.str();
-    } else if (current_tokens >= 1000) {
+    } else if (tokens_per_sec >= 1000) {
         std::ostringstream t_oss;
-        t_oss << std::fixed << std::setprecision(1) << (current_tokens / 1000.0) << "K";
+        t_oss << std::fixed << std::setprecision(1) << (tokens_per_sec / 1000.0) << "K/s";
         tokens_str = t_oss.str();
     } else {
-        tokens_str = std::to_string(current_tokens);
+        std::ostringstream t_oss;
+        t_oss << std::fixed << std::setprecision(1) << tokens_per_sec << "/s";
+        tokens_str = t_oss.str();
     }
     
     // YOLOv5风格：表格格式输出（与epoch汇总行格式一致）+ 进度条
@@ -417,22 +422,27 @@ void train(MTDataset& train_dataset,
         std::ostringstream batch_oss;
         batch_oss << train_batches << "/" << dev_batches;
         
-        // 格式化tokens数量（使用K/M/G等单位）
+        // 计算每秒处理的token数量
+        double tokens_per_sec = (epoch_duration > 0.0) ? (static_cast<double>(train_tokens) / epoch_duration) : 0.0;
+        
+        // 格式化每秒tokens数量（使用K/M/G等单位，添加/s后缀）
         std::string tokens_str;
-        if (train_tokens >= 1000000000) {
+        if (tokens_per_sec >= 1000000000) {
             std::ostringstream t_oss;
-            t_oss << std::fixed << std::setprecision(1) << (train_tokens / 1000000000.0) << "G";
+            t_oss << std::fixed << std::setprecision(1) << (tokens_per_sec / 1000000000.0) << "G/s";
             tokens_str = t_oss.str();
-        } else if (train_tokens >= 1000000) {
+        } else if (tokens_per_sec >= 1000000) {
             std::ostringstream t_oss;
-            t_oss << std::fixed << std::setprecision(1) << (train_tokens / 1000000.0) << "M";
+            t_oss << std::fixed << std::setprecision(1) << (tokens_per_sec / 1000000.0) << "M/s";
             tokens_str = t_oss.str();
-        } else if (train_tokens >= 1000) {
+        } else if (tokens_per_sec >= 1000) {
             std::ostringstream t_oss;
-            t_oss << std::fixed << std::setprecision(1) << (train_tokens / 1000.0) << "K";
+            t_oss << std::fixed << std::setprecision(1) << (tokens_per_sec / 1000.0) << "K/s";
             tokens_str = t_oss.str();
         } else {
-            tokens_str = std::to_string(train_tokens);
+            std::ostringstream t_oss;
+            t_oss << std::fixed << std::setprecision(1) << tokens_per_sec << "/s";
+            tokens_str = t_oss.str();
         }
         
         // YOLOv5风格：按照示例格式输出：train: 前缀，所有列左对齐，最后添加进度条（|====================| 100%）
