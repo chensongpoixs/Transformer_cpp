@@ -164,19 +164,19 @@ Batch MTDataset::collate_fn(const std::vector<size_t>& indices,
     }
 
     {
-        std::ostringstream oss;
-        oss << "构建Batch: 样本数=" << batch_src_text.size()
-            << ", 设备=" << (device.is_cuda() ? "CUDA" : "CPU");
-        LOG_DEBUG(oss.str());
+        //std::ostringstream oss;
+        //oss << "构建Batch: 样本数=" << batch_src_text.size()
+        //    << ", 设备=" << (device.is_cuda() ? "CUDA" : "CPU");
+        //LOG_DEBUG(oss.str());
 
-        // 打印前若干条原始文本，便于调试
-        size_t print_count = std::min<size_t>(batch_src_text.size(), 3);
-        for (size_t i = 0; i < print_count; ++i) {
-            std::ostringstream oss_sample;
-            oss_sample << "  样本[" << i << "]: src=\"" << batch_src_text[i]
-                       << "\", trg=\"" << batch_trg_text[i] << "\"";
-            LOG_DEBUG(oss_sample.str());
-        }
+        //// 打印前若干条原始文本，便于调试
+        //size_t print_count = std::min<size_t>(batch_src_text.size(), 3);
+        //for (size_t i = 0; i < print_count; ++i) {
+        //    std::ostringstream oss_sample;
+        //    oss_sample << "  样本[" << i << "]: src=\"" << batch_src_text[i]
+        //               << "\", trg=\"" << batch_trg_text[i] << "\"";
+        //    LOG_DEBUG(oss_sample.str());
+        //}
     }
     
     // 使用SentencePiece分词器进行编码
@@ -213,12 +213,12 @@ Batch MTDataset::collate_fn(const std::vector<size_t>& indices,
         max_tgt_len = std::max(max_tgt_len, static_cast<int>(tokens.size()));
     }
 
-    {
+   /* {
         std::ostringstream oss;
         oss << "Batch 序列长度: src_max_len=" << max_src_len
             << ", tgt_max_len=" << max_tgt_len;
         LOG_DEBUG(oss.str());
-    }
+    }*/
     
     // 创建tensor并填充
     auto src = torch::full({static_cast<int64_t>(indices.size()), max_src_len}, 
@@ -240,12 +240,12 @@ Batch MTDataset::collate_fn(const std::vector<size_t>& indices,
         }
     }
 
-    {
+   /* {
         std::ostringstream oss;
         oss << "Batch 构建完成: src形状=[" << src.size(0) << ", " << src.size(1)
             << "], trg形状=[" << trg.size(0) << ", " << trg.size(1) << "]";
         LOG_DEBUG(oss.str());
-    }
+    }*/
 
     return Batch(batch_src_text, batch_trg_text, src, trg, pad_idx, device);
 }

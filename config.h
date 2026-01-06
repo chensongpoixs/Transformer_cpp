@@ -25,8 +25,8 @@ struct TransformerConfig {
     int eos_idx = 3;                // 结束符索引
     
     // 训练配置
-    int batch_size = 32;            // 批次大小
-    int epoch_num = 300;            // 训练轮数
+    int batch_size = 40;            // 批次大小
+    int epoch_num = 100;            // 训练轮数
     float lr = 3e-4f;               // 学习率
     
     // 解码配置
