@@ -17,6 +17,14 @@
 torch::Tensor subsequent_mask(int size);
 
 /**
+ * 生成subsequent mask（指定设备）
+ * @param size 序列长度
+ * @param device 设备
+ * @return mask张量
+ */
+torch::Tensor subsequent_mask(int size, torch::Device device);
+
+/**
  * 克隆模块N次
  * @param module 要克隆的模块
  * @param N 克隆次数

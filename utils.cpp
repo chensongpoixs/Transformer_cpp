@@ -8,6 +8,14 @@ torch::Tensor subsequent_mask(int size) {
     return mask == 0;
 }
 
+torch::Tensor subsequent_mask(int size, torch::Device device) {
+    // 创建上三角矩阵（右上角为1，左下角为0），在指定设备上
+    auto mask = torch::triu(torch::ones({1, size, size}, 
+                                        torch::TensorOptions().device(device)), 1);
+    // 返回布尔掩码（右上角为False，左下角为True）
+    return mask == 0;
+}
+
 void xavier_uniform_init(torch::Tensor& tensor) {
     if (tensor.dim() > 1) {
         float gain = std::sqrt(2.0f / (tensor.size(0) + tensor.size(1)));

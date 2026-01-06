@@ -37,6 +37,9 @@ public:
         torch::Tensor src_mask,
         torch::Tensor tgt_mask
     );
+    
+    // 获取generator（用于训练）
+    Generator get_generator() { return generator; }
 
 private:
     Encoder encoder;
