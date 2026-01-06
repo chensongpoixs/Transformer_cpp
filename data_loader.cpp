@@ -5,9 +5,11 @@
 #include <cmath>
 #include <numeric>
 #include <torch/nn/utils/rnn.h>
+#include "json.hpp"
+#include "logger.h"
 
-// 简化版JSON解析（实际应该使用nlohmann/json库）
-// 这里使用简单的文本解析作为占位符
+using namespace logging;
+using json = nlohmann::json;
 
 // Batch实现
 Batch::Batch(const std::vector<std::string>& src_text,
@@ -45,39 +47,52 @@ Batch::Batch(const std::vector<std::string>& src_text,
 
 // MTDataset实现
 void MTDataset::load_data(const std::string& data_path) {
+    LOG_INFO("开始加载数据集(JSON): " + data_path);
+
     std::ifstream file(data_path);
     if (!file.is_open()) {
+        LOG_ERROR("无法打开数据文件: " + data_path);
         throw std::runtime_error("无法打开数据文件: " + data_path);
     }
     
     en_sentences.clear();
     cn_sentences.clear();
-    
-    std::string line;
-    while (std::getline(file, line)) {
-        // 简化版JSON解析：查找 ["...", "..."] 格式
-        // 实际应该使用完整的JSON解析库（如nlohmann/json）
-        size_t first_quote = line.find('"');
-        if (first_quote == std::string::npos) continue;
-        
-        size_t second_quote = line.find('"', first_quote + 1);
-        if (second_quote == std::string::npos) continue;
-        
-        std::string en = line.substr(first_quote + 1, second_quote - first_quote - 1);
-        
-        size_t third_quote = line.find('"', second_quote + 1);
-        if (third_quote == std::string::npos) continue;
-        
-        size_t fourth_quote = line.find('"', third_quote + 1);
-        if (fourth_quote == std::string::npos) continue;
-        
-        std::string cn = line.substr(third_quote + 1, fourth_quote - third_quote - 1);
-        
-        en_sentences.push_back(en);
-        cn_sentences.push_back(cn);
+
+    try {
+        json data;
+        file >> data;
+        file.close();
+
+        if (!data.is_array()) {
+            LOG_ERROR("JSON 格式错误: 根节点不是数组: " + data_path);
+            throw std::runtime_error("JSON 格式错误: 根节点不是数组: " + data_path);
+        }
+
+        size_t entry_count = data.size();
+
+        for (const auto& item : data) {
+            // 期望格式: [ "<en sentence>", "<cn sentence>" ]
+            if (!item.is_array() || item.size() < 2) {
+                continue;
+            }
+            if (!item[0].is_string() || !item[1].is_string()) {
+                continue;
+            }
+            std::string en = item[0].get<std::string>();
+            std::string cn = item[1].get<std::string>();
+            en_sentences.push_back(std::move(en));
+            cn_sentences.push_back(std::move(cn));
+        }
+
+        std::ostringstream oss;
+        oss << "数据文件加载完成(JSON): " << data_path
+            << ", JSON条目数=" << entry_count
+            << ", 有效样本数=" << en_sentences.size();
+        LOG_INFO(oss.str());
+    } catch (const std::exception& e) {
+        LOG_ERROR(std::string("解析JSON失败: ") + data_path + ", 错误: " + e.what());
+        throw;
     }
-    
-    file.close();
     
     // 按英文句子长度排序
     auto sorted_indices = len_argsort(en_sentences);
@@ -88,6 +103,12 @@ void MTDataset::load_data(const std::string& data_path) {
     }
     en_sentences = sorted_en;
     cn_sentences = sorted_cn;
+
+    {
+        std::ostringstream oss;
+        oss << "数据集排序完成, 总样本数=" << en_sentences.size();
+        LOG_INFO(oss.str());
+    }
 }
 
 std::vector<size_t> MTDataset::len_argsort(const std::vector<std::string>& sentences) {
@@ -101,6 +122,8 @@ std::vector<size_t> MTDataset::len_argsort(const std::vector<std::string>& sente
 }
 
 MTDataset::MTDataset(const std::string& data_path) {
+    LOG_INFO("创建MTDataset, 数据路径: " + data_path);
+
     load_data(data_path);
     // 默认加载分词器
     sp_eng_ = english_tokenizer_load();
@@ -108,6 +131,12 @@ MTDataset::MTDataset(const std::string& data_path) {
     PAD_ = sp_eng_->pad_id();
     BOS_ = sp_eng_->bos_id();
     EOS_ = sp_eng_->eos_id();
+
+    {
+        std::ostringstream oss;
+        oss << "MTDataset 初始化完成: 样本数=" << en_sentences.size();
+        LOG_INFO(oss.str());
+    }
 }
 
 void MTDataset::set_tokenizers(std::shared_ptr<SentencePieceTokenizer> eng_tokenizer,
@@ -131,6 +160,22 @@ Batch MTDataset::collate_fn(const std::vector<size_t>& indices,
     for (auto idx : indices) {
         batch_src_text.push_back(en_sentences[idx]);
         batch_trg_text.push_back(cn_sentences[idx]);
+    }
+
+    {
+        std::ostringstream oss;
+        oss << "构建Batch: 样本数=" << batch_src_text.size()
+            << ", 设备=" << (device.is_cuda() ? "CUDA" : "CPU");
+        LOG_DEBUG(oss.str());
+
+        // 打印前若干条原始文本，便于调试
+        size_t print_count = std::min<size_t>(batch_src_text.size(), 3);
+        for (size_t i = 0; i < print_count; ++i) {
+            std::ostringstream oss_sample;
+            oss_sample << "  样本[" << i << "]: src=\"" << batch_src_text[i]
+                       << "\", trg=\"" << batch_trg_text[i] << "\"";
+            LOG_DEBUG(oss_sample.str());
+        }
     }
     
     // 使用SentencePiece分词器进行编码
@@ -166,6 +211,13 @@ Batch MTDataset::collate_fn(const std::vector<size_t>& indices,
     for (const auto& tokens : tgt_tokens_list) {
         max_tgt_len = std::max(max_tgt_len, static_cast<int>(tokens.size()));
     }
+
+    {
+        std::ostringstream oss;
+        oss << "Batch 序列长度: src_max_len=" << max_src_len
+            << ", tgt_max_len=" << max_tgt_len;
+        LOG_DEBUG(oss.str());
+    }
     
     // 创建tensor并填充
     auto src = torch::full({static_cast<int64_t>(indices.size()), max_src_len}, 
@@ -186,7 +238,14 @@ Batch MTDataset::collate_fn(const std::vector<size_t>& indices,
             trg[i][j] = tgt_tokens_list[i][j];
         }
     }
-    
+
+    {
+        std::ostringstream oss;
+        oss << "Batch 构建完成: src形状=[" << src.size(0) << ", " << src.size(1)
+            << "], trg形状=[" << trg.size(0) << ", " << trg.size(1) << "]";
+        LOG_DEBUG(oss.str());
+    }
+
     return Batch(batch_src_text, batch_trg_text, src, trg, pad_idx, device);
 }
 

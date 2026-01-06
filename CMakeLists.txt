@@ -61,6 +61,7 @@ set(SOURCES
     tokenizer_wrapper.cpp
     beam_search.cpp
     bleu.cpp
+    logger.cpp
 )
 
 # 头文件列表
@@ -82,6 +83,7 @@ set(HEADERS
     tokenizer_wrapper.h
     beam_search.h
     bleu.h
+    logger.h
 )
 
 # 创建可执行文件

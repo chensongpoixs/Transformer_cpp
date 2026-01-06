@@ -3,7 +3,9 @@
 #include <sstream>
 #include <algorithm>
 #include <random>
-#include <iostream>
+#include "logger.h"
+
+using namespace logging;
 
 
 #ifdef USE_SENTENCEPIECE
@@ -30,8 +32,8 @@ bool SentencePieceTokenizer::load(const std::string& model_path) {
     // SentencePiece的Load方法返回util::Status
     auto status = processor_->Load(model_path);
     if (!status.ok()) {
-        std::cerr << "错误: 无法加载SentencePiece模型: " << model_path 
-                  << ", 错误: " << status.ToString() << std::endl;
+        LOG_ERROR(std::string("无法加载SentencePiece模型: ") + model_path +
+                  ", 错误: " + status.ToString());
         loaded_ = false;
         return false;
     }
@@ -42,13 +44,17 @@ bool SentencePieceTokenizer::load(const std::string& model_path) {
     eos_id_ = processor_->eos_id();
     
     loaded_ = true;
+    LOG_INFO(std::string("SentencePiece 模型加载成功: ") + model_path +
+             ", pad_id=" + std::to_string(pad_id_) +
+             ", bos_id=" + std::to_string(bos_id_) +
+             ", eos_id=" + std::to_string(eos_id_));
     return true;
 #else
     // 简化模式：检查文件是否存在
     std::ifstream file(model_path);
     if (!file.is_open()) {
-        std::cerr << "警告: SentencePiece模型文件不存在: " << model_path 
-                  << ", 使用简化模式" << std::endl;
+        LOG_WARN(std::string("SentencePiece 模型文件不存在: ") + model_path +
+                 ", 使用字符级简化模式");
         loaded_ = true;  // 标记为已加载，但使用简化模式
         return true;
     }
@@ -140,6 +146,7 @@ std::shared_ptr<SentencePieceTokenizer> english_tokenizer_load() {
     // 尝试加载英文模型
     std::string model_path = "./tokenizer/eng.model";
     tokenizer->load(model_path);
+    LOG_INFO(std::string("英文分词器初始化完成，模型: ") + model_path);
     return tokenizer;
 }
 
@@ -148,6 +155,7 @@ std::shared_ptr<SentencePieceTokenizer> chinese_tokenizer_load() {
     // 尝试加载中文模型
     std::string model_path = "./tokenizer/chn.model";
     tokenizer->load(model_path);
+    LOG_INFO(std::string("中文分词器初始化完成，模型: ") + model_path);
     return tokenizer;
 }
 
