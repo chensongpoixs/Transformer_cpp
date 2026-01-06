@@ -10,9 +10,55 @@
 #include <numeric>
 #include <limits>
 #include <sstream>
+#include <utility>
 
 namespace fs = std::filesystem;
 using namespace logging;
+
+// 仿照 Python tools/create_exp_folder.py 的实验目录创建逻辑
+// 返回: (exp_folder, weights_folder)
+// 支持 YOLOv5 风格的 --project 和 --name 参数
+static std::pair<std::string, std::string> create_exp_folder_cpp(
+    const std::string& project,
+    const std::string& name,
+    bool exist_ok) {
+    
+    fs::path project_path(project);
+    
+    // 确保项目目录存在
+    std::error_code ec;
+    fs::create_directories(project_path, ec);
+    if (ec) {
+        LOG_WARN("创建项目目录失败: " + project_path.string() + ", 错误: " + ec.message());
+    }
+
+    // 首先尝试 project/name
+    fs::path exp_dir = project_path / name;
+    if (!fs::exists(exp_dir) || exist_ok) {
+        if (exist_ok && fs::exists(exp_dir)) {
+            LOG_INFO("实验目录已存在，使用现有目录: " + exp_dir.string());
+        }
+        fs::create_directories(exp_dir / "weights", ec);
+        if (ec) {
+            LOG_WARN("创建权重目录失败: " + (exp_dir / "weights").string() + ", 错误: " + ec.message());
+        }
+        return {exp_dir.string(), (exp_dir / "weights").string()};
+    }
+
+    // 如果 name 已存在且 exist_ok=false，按 name1, name2, ... 递增
+    int exp_num = 1;
+    while (true) {
+        fs::path exp_dir_i = project_path / (name + std::to_string(exp_num));
+        if (!fs::exists(exp_dir_i)) {
+            fs::create_directories(exp_dir_i / "weights", ec);
+            if (ec) {
+                LOG_WARN("创建权重目录失败: " + (exp_dir_i / "weights").string() + ", 错误: " + ec.message());
+            }
+            return {exp_dir_i.string(), (exp_dir_i / "weights").string()};
+        }
+        ++exp_num;
+    }
+}
 
 float run_epoch(MTDataset& dataset,
                 Transformer model,
@@ -20,7 +66,9 @@ float run_epoch(MTDataset& dataset,
                 int batch_size,
                 torch::Device device,
                 const TransformerConfig& config,
-                bool is_training) {
+                bool is_training,
+                int epoch,
+                int total_epochs) {
     
     float total_tokens = 0.0f;
     float total_loss = 0.0f;
@@ -72,7 +120,7 @@ float run_epoch(MTDataset& dataset,
     
     for (size_t i = 0; i < num_batches; ++i) {
         size_t start_idx = i * batch_size;
-        size_t end_idx = std::min(start_idx + batch_size, dataset.size());
+        size_t end_idx = std::min(start_idx + batch_size, indices.size());
         
         // 获取当前批次的索引
         std::vector<size_t> batch_indices(indices.begin() + start_idx, 
@@ -98,25 +146,35 @@ float run_epoch(MTDataset& dataset,
         total_loss += loss * batch.ntokens;
         total_tokens += batch.ntokens;
         
-        // 周期性输出进度
+        // YOLOv5 风格的进度日志（每若干 batch 打一次）
         if ((i + 1) % 10 == 0 || i == num_batches - 1) {
+            float progress = static_cast<float>(i + 1) / static_cast<float>(num_batches);
+            int pct = static_cast<int>(progress * 100.0f + 0.5f);
+
+            float avg_loss_so_far = (total_tokens > 0.0f)
+                ? (total_loss / total_tokens)
+                : 0.0f;
+
             std::ostringstream oss;
-            oss << (is_training ? "[Train] " : "[Eval] ")
-                << "Batch " << (i + 1) << "/" << num_batches
-                << ", 当前损失=" << std::fixed << std::setprecision(3) << loss
-                << ", 累积token数=" << static_cast<long long>(total_tokens);
+            oss << (is_training ? "Train" : "Val")
+                << " | Epoch " << epoch << "/" << total_epochs
+                << " | Batch " << (i + 1) << "/" << num_batches
+                << " (" << std::setw(3) << pct << "%)"
+                << " | Loss " << std::fixed << std::setprecision(3) << loss
+                << " | AvgLoss " << std::fixed << std::setprecision(3) << avg_loss_so_far
+                << " | Tokens " << static_cast<long long>(total_tokens);
             LOG_INFO(oss.str());
         }
     }
     
     float avg_loss = (total_tokens > 0.0f) ? (total_loss / total_tokens) : 0.0f;
-    {
+    /*{
         std::ostringstream oss;
         oss << (is_training ? "[Train] " : "[Eval] ")
             << "Epoch结束, 平均损失=" << std::fixed << std::setprecision(4) << avg_loss
             << ", 总token数=" << static_cast<long long>(total_tokens);
         LOG_INFO(oss.str());
-    }
+    }*/
     return avg_loss;
 }
 
@@ -128,18 +186,18 @@ void train(MTDataset& train_dataset,
            const TransformerConfig& config,
            torch::Device device) {
     
-    // 创建实验文件夹
-    std::string exp_folder = "./run/train/exp_cpp";
-    std::string weights_folder = exp_folder + "/weights";
+    // 创建实验文件夹（对齐 Python 版 create_exp_folder，支持 YOLOv5 风格）
+    auto [exp_folder, weights_folder] = create_exp_folder_cpp(
+        config.project, config.name, config.exist_ok);
+    LOG_INFO("项目目录: " + config.project);
+    LOG_INFO("实验名称: " + config.name);
+    LOG_INFO("实验目录: " + exp_folder);
+    LOG_INFO("权重目录: " + weights_folder);
     
-    try {
-        fs::create_directories(weights_folder);
-        LOG_INFO("实验目录创建/存在: " + weights_folder);
-    } catch (...) {
-        LOG_WARN("无法创建实验目录: " + weights_folder + "，将继续尝试训练（可能无法保存模型）");
-    }
-    
-    float best_bleu_score = -std::numeric_limits<float>::infinity();
+    // YOLOv5 风格：基于验证损失保存最佳模型
+    float best_val_loss = std::numeric_limits<float>::infinity();  // 最小验证损失
+    std::string best_path = weights_folder + "/best.pth";
+    std::string last_path = weights_folder + "/last.pth";
     
     // 创建损失计算器
     auto loss_compute_train = LossCompute(model->get_generator(), criterion, optimizer);
@@ -158,15 +216,17 @@ void train(MTDataset& train_dataset,
         model->train();
         LOG_INFO("开始训练阶段...");
         float train_loss = run_epoch(train_dataset, model, loss_compute_train,
-                                    config.batch_size, device, config, true);
+                                    config.batch_size, device, config, true,
+                                    epoch, config.epoch_num);
         
         // 验证阶段
         model->eval();
         LOG_INFO("开始验证阶段...");
         float dev_loss = run_epoch(dev_dataset, model, loss_compute_eval,
-                                  config.batch_size, device, config, false);
+                                  config.batch_size, device, config, false,
+                                  epoch, config.epoch_num);
         
-        // 计算BLEU分数（简化版，实际需要完整实现）
+        // 计算BLEU分数（用于监控，但不用于保存模型）
         float bleu_score = evaluate(dev_dataset, model, config, device);
         
         {
@@ -178,40 +238,60 @@ void train(MTDataset& train_dataset,
             LOG_INFO(oss.str());
         }
         
-        // 保存最佳模型
-        if (bleu_score > best_bleu_score) {
-            if (best_bleu_score != -std::numeric_limits<float>::infinity()) {
-                std::string old_path = weights_folder + "/best_bleu_" + 
-                                     std::to_string(best_bleu_score) + ".pth";
-                try {
-                    fs::remove(old_path);
-                } catch (...) {
-                    LOG_WARN("删除旧最佳模型失败: " + old_path);
-                }
-            }
-            
-            std::string best_path = weights_folder + "/best_bleu_" + 
-                                   std::to_string(bleu_score) + ".pth";
+        // YOLOv5 风格：基于验证损失保存最佳模型
+        // 如果当前验证损失小于历史最小损失，保存为 best.pth
+        if (dev_loss < best_val_loss) {
             try {
                 torch::save(model, best_path);
-                LOG_INFO("保存新的最佳模型: " + best_path);
+                {
+                    std::ostringstream oss;
+                    if (best_val_loss == std::numeric_limits<float>::infinity()) {
+                        oss << "保存最佳模型: " << best_path 
+                            << " (ValLoss=" << std::fixed << std::setprecision(3) << dev_loss << ")";
+                    } else {
+                        oss << "保存最佳模型: " << best_path 
+                            << " (ValLoss=" << std::fixed << std::setprecision(3) << dev_loss
+                            << " < " << std::fixed << std::setprecision(3) << best_val_loss << ")";
+                    }
+                    LOG_INFO(oss.str());
+                }
+                best_val_loss = dev_loss;
             } catch (const std::exception& e) {
                 LOG_ERROR(std::string("保存最佳模型失败: ") + best_path + ", 错误: " + e.what());
             }
-            best_bleu_score = bleu_score;
         }
         
-        // 保存最后一个epoch的模型
-        if (epoch == config.epoch_num) {
-            std::string last_path = weights_folder + "/last_bleu_" + 
-                                   std::to_string(bleu_score) + ".pth";
-            try {
-                torch::save(model, last_path);
-                LOG_INFO("保存最后模型: " + last_path);
-            } catch (const std::exception& e) {
-                LOG_ERROR(std::string("保存最后模型失败: ") + last_path + ", 错误: " + e.what());
+        // YOLOv5 风格：每个 epoch 都保存 last.pth（覆盖之前的）
+        try {
+            torch::save(model, last_path);
+            {
+                std::ostringstream oss;
+                oss << "保存最后模型: " << last_path 
+                    << " (Epoch " << epoch << ", ValLoss=" 
+                    << std::fixed << std::setprecision(3) << dev_loss << ")";
+                LOG_INFO(oss.str());
             }
+        } catch (const std::exception& e) {
+            LOG_ERROR(std::string("保存最后模型失败: ") + last_path + ", 错误: " + e.what());
         }
+    }
+    
+    // 训练结束，输出总结
+    {
+        std::ostringstream oss;
+        oss << "========== 训练完成 ==========";
+        LOG_INFO(oss.str());
+    }
+    {
+        std::ostringstream oss;
+        oss << "最佳验证损失: " << std::fixed << std::setprecision(3) << best_val_loss
+            << " (保存在: " << best_path << ")";
+        LOG_INFO(oss.str());
+    }
+    {
+        std::ostringstream oss;
+        oss << "最后模型: " << last_path;
+        LOG_INFO(oss.str());
     }
 }
 

@@ -8,8 +8,147 @@
 #include "logger.h"
 #include <memory>
 #include <iomanip>
+#include <filesystem>
 
 using namespace logging;
+namespace fs = std::filesystem;
+
+/**
+ * YOLOv5 风格命令行解析
+ * 参考 YOLOv5 train.py 的参数风格
+ */
+static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
+    std::string data_dir_arg;
+    bool show_help = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        auto next = [&](int& idx) -> const char* {
+            if (idx + 1 >= argc) {
+                LOG_WARN("命令行参数缺少值: " + arg);
+                return nullptr;
+            }
+            return argv[++idx];
+        };
+
+        // YOLOv5 风格参数（使用短横线）
+        if (arg == "--data") {
+            if (auto v = next(i)) data_dir_arg = v;
+        } else if (arg == "--batch-size") {
+            if (auto v = next(i)) config.batch_size = std::stoi(v);
+        } else if (arg == "--epochs") {
+            if (auto v = next(i)) config.epoch_num = std::stoi(v);
+        } else if (arg == "--lr") {
+            if (auto v = next(i)) config.lr = std::stof(v);
+        } else if (arg == "--d-model") {
+            if (auto v = next(i)) config.d_model = std::stoi(v);
+        } else if (arg == "--n-layers") {
+            if (auto v = next(i)) config.n_layers = std::stoi(v);
+        } else if (arg == "--n-heads") {
+            if (auto v = next(i)) config.n_heads = std::stoi(v);
+        } else if (arg == "--d-ff") {
+            if (auto v = next(i)) config.d_ff = std::stoi(v);
+        } else if (arg == "--dropout") {
+            if (auto v = next(i)) config.dropout = std::stof(v);
+        } else if (arg == "--beam-size") {
+            if (auto v = next(i)) config.beam_size = std::stoi(v);
+        } else if (arg == "--device") {
+            if (auto v = next(i)) {
+                std::string device_str = v;
+                if (device_str == "cpu") {
+                    config.use_cuda = false;
+                } else {
+                    try {
+                        config.device_id = std::stoi(device_str);
+                        config.use_cuda = true;
+                    } catch (...) {
+                        LOG_WARN("无效的设备ID: " + device_str + "，使用默认值");
+                    }
+                }
+            }
+        } else if (arg == "--project") {
+            if (auto v = next(i)) config.project = v;
+        } else if (arg == "--name") {
+            if (auto v = next(i)) config.name = v;
+        } else if (arg == "--weights") {
+            if (auto v = next(i)) config.weights = v;
+        } else if (arg == "--resume") {
+            if (auto v = next(i)) config.resume = v;
+        } else if (arg == "--workers") {
+            if (auto v = next(i)) config.workers = std::stoi(v);
+        } else if (arg == "--exist-ok") {
+            config.exist_ok = true;
+        } else if (arg == "--help" || arg == "-h") {
+            show_help = true;
+        } else {
+            LOG_WARN("未知命令行参数: " + arg);
+        }
+    }
+
+    if (show_help) {
+        LOG_INFO("Transformer C++ 训练程序 - YOLOv5 风格命令行参数");
+        LOG_INFO("");
+        LOG_INFO("数据相关:");
+        LOG_INFO("  --data <path>              数据目录（包含 train.json/dev.json/test.json）");
+        LOG_INFO("");
+        LOG_INFO("训练相关:");
+        LOG_INFO("  --batch-size <int>         批次大小 (默认: " + std::to_string(config.batch_size) + ")");
+        LOG_INFO("  --epochs <int>             训练轮数 (默认: " + std::to_string(config.epoch_num) + ")");
+        LOG_INFO("  --lr <float>               学习率 (默认: " + std::to_string(config.lr) + ")");
+        LOG_INFO("  --workers <int>            数据加载线程数 (默认: " + std::to_string(config.workers) + ", 0=单线程)");
+        LOG_INFO("");
+        LOG_INFO("模型相关:");
+        LOG_INFO("  --d-model <int>            模型维度 (默认: " + std::to_string(config.d_model) + ")");
+        LOG_INFO("  --n-layers <int>           Transformer层数 (默认: " + std::to_string(config.n_layers) + ")");
+        LOG_INFO("  --n-heads <int>            多头注意力头数 (默认: " + std::to_string(config.n_heads) + ")");
+        LOG_INFO("  --d-ff <int>               前馈网络隐藏层维度 (默认: " + std::to_string(config.d_ff) + ")");
+        LOG_INFO("  --dropout <float>          Dropout率 (默认: " + std::to_string(config.dropout) + ")");
+        LOG_INFO("  --beam-size <int>          Beam Search大小 (默认: " + std::to_string(config.beam_size) + ")");
+        LOG_INFO("");
+        LOG_INFO("实验相关:");
+        LOG_INFO("  --project <path>           项目目录 (默认: " + config.project + ")");
+        LOG_INFO("  --name <str>               实验名称 (默认: " + config.name + ")");
+        LOG_INFO("  --exist-ok                 如果实验目录已存在则覆盖");
+        LOG_INFO("");
+        LOG_INFO("其他:");
+        LOG_INFO("  --device <int|cpu>         设备 (默认: " + std::to_string(config.device_id) + ", 或 'cpu')");
+        LOG_INFO("  --weights <path>           预训练权重路径");
+        LOG_INFO("  --resume <path>            恢复训练的检查点路径");
+        LOG_INFO("  --help, -h                 显示此帮助信息");
+        LOG_INFO("");
+        LOG_INFO("示例:");
+        LOG_INFO("  transformer.exe --data D:/data/mt --batch-size 64 --epochs 50");
+        LOG_INFO("  transformer.exe --data ./data --project runs/train --name exp1 --exist-ok");
+        return false;  // 返回 false 表示应该退出程序
+    }
+
+    // 处理 data_dir：如果命令行传入，则覆盖默认值，并自动拼接 json 路径
+    if (!data_dir_arg.empty()) {
+        fs::path base(data_dir_arg);
+        config.data_dir = base.string();
+
+        fs::path train_p = base / "train.json";
+        fs::path dev_p   = base / "dev.json";
+        fs::path test_p  = base / "test.json";
+
+        config.train_data_path = train_p.string();
+        config.dev_data_path   = dev_p.string();
+        config.test_data_path  = test_p.string();
+
+        LOG_INFO("使用命令行指定的数据目录: " + config.data_dir);
+        LOG_INFO("  train_data_path = " + config.train_data_path);
+        LOG_INFO("  dev_data_path   = " + config.dev_data_path);
+        LOG_INFO("  test_data_path  = " + config.test_data_path);
+    } else {
+        // 未指定 data_dir，则沿用 config 默认值
+        LOG_INFO("未通过命令行指定 --data，使用默认路径:");
+        LOG_INFO("  train_data_path = " + config.train_data_path);
+        LOG_INFO("  dev_data_path   = " + config.dev_data_path);
+        LOG_INFO("  test_data_path  = " + config.test_data_path);
+    }
+    
+    return true;  // 返回 true 表示继续执行程序
+}
 
 /**
  * Transformer训练主程序
@@ -23,8 +162,12 @@ int main(int argc, char* argv[]) {
     LOG_INFO("Transformer C++ Training Implementation");
     LOG_INFO("========================================");
     
-    // 加载配置
+    // 加载配置（先用默认值，再用命令行参数覆盖）
     TransformerConfig config;
+    if (!parse_args(argc, argv, config)) {
+        // 如果 parse_args 返回 false（例如用户请求 --help），则退出
+        return 0;
+    }
     
     // 设置设备
     torch::Device device(config.use_cuda && torch::cuda::is_available() 
@@ -89,6 +232,38 @@ int main(int argc, char* argv[]) {
             num_params += param.numel();
         }
         LOG_INFO("总参数量: " + std::to_string(num_params));
+        
+        // 加载预训练权重（如果指定了 --weights）
+        if (!config.weights.empty()) {
+            try {
+                if (fs::exists(config.weights)) {
+                    torch::load(model, config.weights, device);
+                    LOG_INFO("成功加载预训练权重: " + config.weights);
+                } else {
+                    LOG_WARN("权重文件不存在: " + config.weights);
+                }
+            } catch (const std::exception& e) {
+                LOG_ERROR(std::string("加载权重失败: ") + config.weights + ", 错误: " + e.what());
+            }
+        }
+        
+        // 恢复训练（如果指定了 --resume）
+        int start_epoch = 1;
+        if (!config.resume.empty()) {
+            try {
+                if (fs::exists(config.resume)) {
+                    torch::load(model, config.resume, device);
+                    // 注意：这里简化处理，实际应该也加载优化器状态和 epoch 编号
+                    // 为了完整实现，需要保存/加载更多状态信息
+                    LOG_INFO("成功恢复训练检查点: " + config.resume);
+                    LOG_WARN("注意：当前实现仅恢复模型权重，未恢复优化器状态和 epoch 编号");
+                } else {
+                    LOG_WARN("检查点文件不存在: " + config.resume);
+                }
+            } catch (const std::exception& e) {
+                LOG_ERROR(std::string("恢复训练失败: ") + config.resume + ", 错误: " + e.what());
+            }
+        }
         
         // 创建损失函数
         auto criterion = torch::nn::CrossEntropyLoss(

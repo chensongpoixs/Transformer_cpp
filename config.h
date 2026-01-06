@@ -25,7 +25,7 @@ struct TransformerConfig {
     int eos_idx = 3;                // 结束符索引
     
     // 训练配置
-    int batch_size = 40;            // 批次大小
+    int batch_size = 30;            // 批次大小
     int epoch_num = 100;            // 训练轮数
     float lr = 3e-4f;               // 学习率
     
@@ -40,9 +40,17 @@ struct TransformerConfig {
     std::string test_data_path = "./data/json/test.json";
     std::string model_path = "./weights/transformer_model.pth";
     
+    // YOLOv5 风格配置
+    std::string project = "run/train";  // 项目目录（类似 YOLOv5 的 --project）
+    std::string name = "exp";           // 实验名称（类似 YOLOv5 的 --name）
+    std::string weights = "";           // 预训练权重路径（类似 YOLOv5 的 --weights）
+    std::string resume = "";            // 恢复训练的检查点路径（类似 YOLOv5 的 --resume）
+    int workers = 0;                    // 数据加载线程数（类似 YOLOv5 的 --workers，0=单线程）
+    bool exist_ok = false;              // 如果实验目录已存在是否覆盖（类似 YOLOv5 的 --exist-ok）
+    
     // 设备配置
     bool use_cuda = true;           // 是否使用CUDA
-    int device_id = 0;              // GPU设备ID
+    int device_id = 0;              // GPU设备ID（或 "cpu"）
 };
 
 #endif // TRANSFORMER_CONFIG_H

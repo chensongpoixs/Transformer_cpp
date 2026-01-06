@@ -26,7 +26,9 @@ float run_epoch(MTDataset& dataset,
                 int batch_size,
                 torch::Device device,
                 const TransformerConfig& config,
-                bool is_training = true);
+                bool is_training = true,
+                int epoch = 0,
+                int total_epochs = 0);
 
 /**
  * 训练函数
