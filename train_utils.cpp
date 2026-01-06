@@ -73,7 +73,16 @@ float LossCompute::operator()(torch::Tensor out, torch::Tensor targets, float no
         opt->step();  // NoamOpt的step()已经包含了optimizer->step()和zero_grad()
     }
     
+    // 提取损失值（在反向传播后，计算图会自动释放）
+    float loss_value = loss.item<float>();
+    
+    // 显式释放中间张量（帮助释放显存）
+    loss = torch::Tensor();
+    log_probs_flat = torch::Tensor();
+    targets_flat = torch::Tensor();
+    log_probs = torch::Tensor();
+    
     // 返回归一化后的损失
-    return loss.item<float>() / normalize;
+    return loss_value / normalize;
 }
 

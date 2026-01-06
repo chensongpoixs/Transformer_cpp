@@ -263,6 +263,22 @@ beam_search(Transformer model,
         
         batch_hyp.push_back(hyps);
         batch_scores.push_back(scs);
+        
+        // 显式释放 scores 和 tail_idxs 张量
+        scores = torch::Tensor();
+        tail_idxs = torch::Tensor();
+    }
+    
+    // 显式释放所有中间张量
+    src_enc = torch::Tensor();
+    src_mask = torch::Tensor();
+    
+    // 清理Beam对象（会自动释放其持有的张量）
+    inst_dec_beams.clear();
+    
+    // 清理CUDA缓存
+    if (device.is_cuda()) {
+    //    torch::cuda::empty_cache();
     }
     
     return {batch_hyp, batch_scores};

@@ -4,6 +4,7 @@
 #include "tokenizer_wrapper.h"
 #include "logger.h"
 #include "gpu_profiler.h"
+#include "json.hpp"
 #include <iomanip>
 #include <algorithm>
 #include <random>
@@ -17,11 +18,14 @@
 #include <cmath>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
+#include <fstream>
+#include <ctime>
 
 
 namespace fs = std::filesystem;
 using namespace logging;
 using namespace std::chrono;
+using json = nlohmann::json;
 
 // 仿照 Python tools/create_exp_folder.py 的实验目录创建逻辑
 // 返回: (exp_folder, weights_folder)
@@ -67,6 +71,90 @@ static std::pair<std::string, std::string> create_exp_folder_cpp(
         ++exp_num;
     }
 }
+
+/**
+ * 保存训练配置文件（YOLOv5 风格）
+ * @param config 训练配置
+ * @param exp_folder 实验文件夹路径
+ */
+static void save_config_file(const TransformerConfig& config, const std::string& exp_folder) {
+    // 保存到文件（使用 config.yaml）
+    std::string config_path = exp_folder + "/config.yaml";
+    std::ofstream config_file(config_path);
+    if (!config_file.is_open()) {
+        LOG_WARN("无法保存训练配置: " + config_path);
+        return;
+    }
+    
+    // YOLOv5 风格的 YAML 格式，带注释和分组
+    config_file << "# Transformer Training Configuration\n";
+    config_file << "# Generated automatically during training\n\n";
+    
+    // Train 训练配置
+    config_file << "# Train\n";
+    config_file << "epochs: " << config.epoch_num << "  # 训练轮数\n";
+    config_file << "batch_size: " << config.batch_size << "  # 批次大小\n";
+    config_file << "lr: " << std::scientific << config.lr << "  # 学习率\n";
+    config_file << "workers: " << config.workers << "  # 数据加载线程数\n";
+    config_file << "\n";
+    
+    // Model 模型配置
+    config_file << "# Model\n";
+    config_file << "d_model: " << config.d_model << "  # 模型维度\n";
+    config_file << "n_heads: " << config.n_heads << "  # 多头注意力头数\n";
+    config_file << "n_layers: " << config.n_layers << "  # Transformer层数\n";
+    config_file << "d_k: " << config.d_k << "  # 每个头的键向量维度\n";
+    config_file << "d_v: " << config.d_v << "  # 每个头的值向量维度\n";
+    config_file << "d_ff: " << config.d_ff << "  # 前馈网络隐藏层维度\n";
+    config_file << "dropout: " << std::fixed << std::setprecision(2) << config.dropout << "  # Dropout率\n";
+    config_file << "\n";
+    
+    // Vocabulary 词汇表配置
+    config_file << "# Vocabulary\n";
+    config_file << "src_vocab_size: " << config.src_vocab_size << "  # 源语言词汇表大小\n";
+    config_file << "tgt_vocab_size: " << config.tgt_vocab_size << "  # 目标语言词汇表大小\n";
+    config_file << "padding_idx: " << config.padding_idx << "  # Padding标记索引\n";
+    config_file << "bos_idx: " << config.bos_idx << "  # 开始符索引\n";
+    config_file << "eos_idx: " << config.eos_idx << "  # 结束符索引\n";
+    config_file << "\n";
+    
+    // Decode 解码配置
+    config_file << "# Decode\n";
+    config_file << "max_len: " << config.max_len << "  # 最大序列长度\n";
+    config_file << "beam_size: " << config.beam_size << "  # Beam Search大小\n";
+    config_file << "\n";
+    
+    // Data 数据路径配置
+    config_file << "# Data\n";
+    config_file << "data_dir: " << config.data_dir << "  # 数据目录\n";
+    config_file << "train: " << config.train_data_path << "  # 训练集路径\n";
+    config_file << "val: " << config.dev_data_path << "  # 验证集路径\n";
+    config_file << "test: " << config.test_data_path << "  # 测试集路径\n";
+    config_file << "\n";
+    
+    // Tokenizer 分词器配置
+    config_file << "# Tokenizer\n";
+    config_file << "tokenizer_dir: " << config.tokenizer_dir << "  # 分词器目录\n";
+    config_file << "tokenizer_eng: " << config.tokenizer_eng << "  # 英文分词器模型路径\n";
+    config_file << "tokenizer_chn: " << config.tokenizer_chn << "  # 中文分词器模型路径\n";
+    config_file << "\n";
+    
+    // Project 项目配置
+    config_file << "# Project\n";
+    config_file << "project: " << config.project << "  # 项目目录\n";
+    config_file << "name: " << config.name << "  # 实验名称\n";
+    config_file << "exist_ok: " << (config.exist_ok ? "true" : "false") << "  # 是否覆盖已存在目录\n";
+    config_file << "\n";
+    
+    // Device 设备配置
+    config_file << "# Device\n";
+    config_file << "use_cuda: " << (config.use_cuda ? "true" : "false") << "  # 是否使用CUDA\n";
+    config_file << "device_id: " << config.device_id << "  # GPU设备ID\n";
+    
+    config_file.close();
+    LOG_INFO("保存训练配置: " + config_path);
+}
+
 
 /**
  * YOLOv5 风格的表格格式实时更新（带进度条）
@@ -256,9 +344,18 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         GPUProfiler::end_timer("collate_fn");
         
         // 前向传播（性能分析）
-        GPUProfiler::start_timer("forward");
-        auto out = model->forward(batch.src, batch.trg, batch.src_mask, batch.trg_mask);
-        GPUProfiler::end_timer("forward");
+        // 验证阶段使用 NoGradGuard 避免构建计算图，节省显存
+        torch::Tensor out;
+        if (is_training) {
+            GPUProfiler::start_timer("forward");
+            out = model->forward(batch.src, batch.trg, batch.src_mask, batch.trg_mask);
+            GPUProfiler::end_timer("forward");
+        } else {
+            torch::NoGradGuard no_grad;
+            GPUProfiler::start_timer("forward");
+            out = model->forward(batch.src, batch.trg, batch.src_mask, batch.trg_mask);
+            GPUProfiler::end_timer("forward");
+        }
         
         // 计算损失（性能分析）
         GPUProfiler::start_timer("loss_compute");
@@ -269,6 +366,10 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         total_loss += loss * batch.ntokens;
         total_tokens += batch.ntokens;
         processed_samples += batch_indices.size();
+        
+        // 显式释放中间张量（帮助释放显存）
+        // 训练和验证阶段都需要释放，避免张量引用累积
+        out = torch::Tensor();
         
         // 计算速度和剩余时间（使用从 epoch 开始的总时间）
         auto batch_end = steady_clock::now();
@@ -294,12 +395,23 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         print_progress_bar(epoch, total_epochs, i, num_batches,
                           loss, avg_loss_so_far, speed, eta, is_training, device, elapsed_time,
                           static_cast<long long>(total_tokens), num_batches);
+        
+        // 定期清理CUDA缓存（每50个batch清理一次，避免频繁清理影响性能）
+        if (device.is_cuda() && (i + 1) % 50 == 0) {
+          //  torch::cuda::empty_cache();
+        }
     }
     
     // 性能分析：在第一个epoch结束后打印
     if (epoch == 1 && is_training) {
         GPUProfiler::print_summary();
         GPUProfiler::check_gpu_utilization(device);
+    }
+    
+    // epoch结束后清理CUDA缓存
+    if (device.is_cuda()) {
+       // torch::cuda::empty_cache();
+       // torch::cuda::synchronize();
     }
     
     float avg_loss = (total_tokens > 0.0f) ? (total_loss / total_tokens) : 0.0f;
@@ -330,6 +442,9 @@ void train(MTDataset& train_dataset,
     LOG_INFO("实验名称: " + config.name);
     LOG_INFO("实验目录: " + exp_folder);
     LOG_INFO("权重目录: " + weights_folder);
+    
+    // 保存训练配置文件（YOLOv5 风格）
+    save_config_file(config, exp_folder);
     
     // YOLOv5 风格：基于验证损失保存最佳模型
     float best_val_loss = std::numeric_limits<float>::infinity();  // 最小验证损失
@@ -445,10 +560,10 @@ void train(MTDataset& train_dataset,
             tokens_str = t_oss.str();
         }
         
-        // YOLOv5风格：按照示例格式输出：train: 前缀，所有列左对齐，最后添加进度条（|====================| 100%）
+        // YOLOv5风格：按照示例格式输出：val: 前缀，所有列左对齐，最后添加进度条（|====================| 100%）
         // 格式要与表头完全对齐
         std::string full_bar(20, '=');  // 100%进度条
-        std::cout << "train: "
+        std::cout << "val: "
                   << std::setw(10) << std::left << (std::to_string(epoch) + "/" + std::to_string(config.epoch_num))
                   << std::setw(12) << std::left << gpu_mem
                   << std::setw(15) << std::left << batch_oss.str()
@@ -464,6 +579,11 @@ void train(MTDataset& train_dataset,
         // 如果当前验证损失小于历史最小损失，保存为 best.pth
         if (dev_loss < best_val_loss) {
             try {
+                // 保存前清理CUDA缓存，释放未使用的显存
+                if (device.is_cuda()) {
+                 //   torch::cuda::empty_cache();
+                }
+                // 直接保存模型（不包含配置参数）
                 torch::save(model, best_path);
                 {
                     std::ostringstream oss;
@@ -478,6 +598,10 @@ void train(MTDataset& train_dataset,
                     LOG_INFO(oss.str());
                 }
                 best_val_loss = dev_loss;
+                // 保存后清理CUDA缓存
+                if (device.is_cuda()) {
+                  //  torch::cuda::empty_cache();
+                }
             } catch (const std::exception& e) {
                 LOG_ERROR(std::string("保存最佳模型失败: ") + best_path + ", 错误: " + e.what());
             }
@@ -485,6 +609,11 @@ void train(MTDataset& train_dataset,
         
         // YOLOv5 风格：每个 epoch 都保存 last.pth（覆盖之前的）
         try {
+            // 保存前清理CUDA缓存
+            if (device.is_cuda()) {
+             //   torch::cuda::empty_cache();
+            }
+            // 直接保存模型（不包含配置参数）
             torch::save(model, last_path);
             {
                 std::ostringstream oss;
@@ -492,6 +621,10 @@ void train(MTDataset& train_dataset,
                     << " (Epoch " << epoch << ", ValLoss=" 
                     << std::fixed << std::setprecision(3) << dev_loss << ")";
                 LOG_INFO(oss.str());
+            }
+            // 保存后清理CUDA缓存
+            if (device.is_cuda()) {
+            //   torch::cuda::empty_cache();
             }
         } catch (const std::exception& e) {
             LOG_ERROR(std::string("保存最后模型失败: ") + last_path + ", 错误: " + e.what());
@@ -576,10 +709,28 @@ float evaluate(MTDataset& dataset,
             refs.push_back(tokenize_chinese(batch.trg_text[j]));
             all_references.push_back(refs);
         }
+        
+        // 显式释放 batch 中的张量（帮助释放显存）
+        batch.src = torch::Tensor();
+        batch.trg = torch::Tensor();
+        batch.trg_y = torch::Tensor();
+        batch.src_mask = torch::Tensor();
+        batch.trg_mask = torch::Tensor();
+        
+        // 定期清理CUDA缓存（每10个batch清理一次）
+        if (device.is_cuda() && (i + 1) % 10 == 0) {
+            //torch::cuda::empty_cache();
+        }
     }
     
     // 计算BLEU分数
     float bleu_score = corpus_bleu(all_candidates, all_references, 4);
+    
+    // 评估结束后清理CUDA缓存
+    if (device.is_cuda()) {
+      //  torch::cuda::empty_cache();
+    }
+    
     return bleu_score;
 }
 

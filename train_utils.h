@@ -16,6 +16,13 @@ public:
     
     void step();
     float rate(int step = -1);
+    
+    // 获取和设置当前步数（用于保存/加载 checkpoint）
+    int get_current_step() const { return current_step; }
+    void set_current_step(int step) { current_step = step; }
+    
+    // 获取底层优化器（用于保存/加载优化器状态）
+    std::shared_ptr<torch::optim::Optimizer> get_optimizer() { return optimizer; }
 
 private:
     int model_size;
