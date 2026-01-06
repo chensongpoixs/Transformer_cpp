@@ -62,6 +62,7 @@ set(SOURCES
     beam_search.cpp
     bleu.cpp
     logger.cpp
+    gpu_profiler.cpp
 )
 
 # 头文件列表
@@ -84,6 +85,7 @@ set(HEADERS
     beam_search.h
     bleu.h
     logger.h
+    gpu_profiler.h
 )
 
 # 创建可执行文件

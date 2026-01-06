@@ -3,6 +3,7 @@
 #include "bleu.h"
 #include "tokenizer_wrapper.h"
 #include "logger.h"
+#include "gpu_profiler.h"
 #include <iomanip>
 #include <algorithm>
 #include <random>
@@ -195,21 +196,22 @@ float run_epoch(MTDataset& dataset,
         std::vector<size_t> batch_indices(indices.begin() + start_idx, 
                                          indices.begin() + end_idx);
         
-        // 创建batch
+        // 创建batch（性能分析）
+        GPUProfiler::start_timer("collate_fn");
         auto batch = dataset.collate_fn(batch_indices, device,
                                        config.padding_idx, config.bos_idx, config.eos_idx,
                                        config.src_vocab_size, config.tgt_vocab_size);
+        GPUProfiler::end_timer("collate_fn");
         
-        // 前向传播
+        // 前向传播（性能分析）
+        GPUProfiler::start_timer("forward");
         auto out = model->forward(batch.src, batch.trg, batch.src_mask, batch.trg_mask);
-        {
-            //std::ostringstream oss;
-            //oss << ""
-            //LOG_DEBUG("");
-        }
+        GPUProfiler::end_timer("forward");
         
-        // 计算损失
+        // 计算损失（性能分析）
+        GPUProfiler::start_timer("loss_compute");
         float loss = loss_compute(out, batch.trg_y, static_cast<float>(batch.ntokens));
+        GPUProfiler::end_timer("loss_compute");
         
         // 累加
         total_loss += loss * batch.ntokens;
@@ -236,6 +238,12 @@ float run_epoch(MTDataset& dataset,
         // 显示 YOLOv5 风格的进度条（每个 batch 都更新）
         print_progress_bar(epoch, total_epochs, i, num_batches,
                           loss, avg_loss_so_far, speed, eta, is_training);
+    }
+    
+    // 性能分析：在第一个epoch结束后打印
+    if (epoch == 1 && is_training) {
+        GPUProfiler::print_summary();
+        GPUProfiler::check_gpu_utilization(device);
     }
     
     float avg_loss = (total_tokens > 0.0f) ? (total_loss / total_tokens) : 0.0f;
