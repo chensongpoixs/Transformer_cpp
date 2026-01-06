@@ -75,12 +75,14 @@ static std::pair<std::string, std::string> create_exp_folder_cpp(
  * @param speed 处理速度（samples/s）
  * @param eta 预计剩余时间（秒）
  * @param is_training 是否为训练模式
+ * @param device GPU设备（用于显示显存使用）
  */
 static void print_progress_bar(int epoch, int total_epochs,
                                size_t batch_idx, size_t total_batches,
                                float loss, float avg_loss,
                                double speed, double eta,
-                               bool is_training) {
+                               bool is_training,
+                               torch::Device device) {
     const int bar_width = 30;
     float progress = static_cast<float>(batch_idx + 1) / static_cast<float>(total_batches);
     int filled = static_cast<int>(progress * bar_width);
@@ -108,10 +110,14 @@ static void print_progress_bar(int epoch, int total_epochs,
         }
     };
     
+    // 获取GPU内存使用情况
+    std::string gpu_mem = GPUProfiler::get_gpu_memory_str(device);
+    
     std::ostringstream oss;
     oss << mode << ": " << epoch << "/" << total_epochs
         << " [" << bar << "] " << std::setw(3) << pct << "%"
         << " " << std::setw(4) << (batch_idx + 1) << "/" << total_batches
+        << " GPU=" << gpu_mem
         << " loss=" << std::fixed << std::setprecision(3) << loss
         << " avg_loss=" << std::fixed << std::setprecision(3) << avg_loss
         << " " << std::fixed << std::setprecision(1) << speed << " samples/s"
@@ -235,9 +241,9 @@ float run_epoch(MTDataset& dataset,
             eta = remaining_samples / speed;
         }
         
-        // 显示 YOLOv5 风格的进度条（每个 batch 都更新）
+        // 显示 YOLOv5 风格的进度条（每个 batch 都更新，包含GPU内存信息）
         print_progress_bar(epoch, total_epochs, i, num_batches,
-                          loss, avg_loss_so_far, speed, eta, is_training);
+                          loss, avg_loss_so_far, speed, eta, is_training, device);
     }
     
     // 性能分析：在第一个epoch结束后打印
@@ -293,14 +299,28 @@ void train(MTDataset& train_dataset,
         
         // 训练阶段
         model->train();
-        LOG_INFO("开始训练阶段...");
+        {
+            std::ostringstream oss;
+            oss << "开始训练阶段...";
+            if (device.is_cuda()) {
+                oss << " GPU显存: " << GPUProfiler::get_gpu_memory_str(device);
+            }
+            LOG_INFO(oss.str());
+        }
         float train_loss = run_epoch(train_dataset, model, loss_compute_train,
                                     config.batch_size, device, config, true,
                                     epoch, config.epoch_num);
         
         // 验证阶段
         model->eval();
-        LOG_INFO("开始验证阶段...");
+        {
+            std::ostringstream oss;
+            oss << "开始验证阶段...";
+            if (device.is_cuda()) {
+                oss << " GPU显存: " << GPUProfiler::get_gpu_memory_str(device);
+            }
+            LOG_INFO(oss.str());
+        }
         float dev_loss = run_epoch(dev_dataset, model, loss_compute_eval,
                                   config.batch_size, device, config, false,
                                   epoch, config.epoch_num);

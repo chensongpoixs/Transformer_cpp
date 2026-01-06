@@ -34,6 +34,9 @@ public:
     
     // 获取GPU内存使用情况
     static void print_gpu_memory(torch::Device device);
+    
+    // 获取GPU内存使用情况（返回格式化字符串，用于进度条显示）
+    static std::string get_gpu_memory_str(torch::Device device);
 
 private:
     static std::map<std::string, std::chrono::steady_clock::time_point> start_times_;

@@ -4,7 +4,8 @@
 #include <sstream>
 #include <mutex>
 #include <limits>
-
+#include <c10/cuda/CUDAGuard.h>
+#include <cuda_runtime.h>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -157,11 +158,12 @@ void GPUProfiler::print_gpu_memory(torch::Device device) {
         size_t allocated = 0;
         size_t cached = 0;
         
-        try {
+      /*  try {
             auto stats = torch::cuda::memory_stats(device.index());
             allocated = stats.allocated_bytes.all.current;
             cached = stats.reserved_bytes.all.current;
-        } catch (...) {
+        } catch (...) */
+        {
 #ifdef USE_CUDA
             // 如果获取失败，尝试使用CUDA API
             size_t free = 0;
@@ -197,6 +199,43 @@ void GPUProfiler::print_gpu_memory(torch::Device device) {
         }
     } catch (const std::exception& e) {
         LOG_WARN(std::string("获取GPU显存信息失败: ") + e.what());
+    }
+}
+
+std::string GPUProfiler::get_gpu_memory_str(torch::Device device) {
+    if (!device.is_cuda()) {
+        return "CPU";
+    }
+    
+    try {
+        c10::cuda::CUDAGuard guard(device);
+        
+        size_t allocated = 0;
+        size_t total = 0;
+        
+#ifdef USE_CUDA
+        size_t free = 0;
+        if (cudaMemGetInfo(&free, &total) == cudaSuccess) {
+            allocated = total - free;
+        } else {
+            return "N/A";
+        }
+#else
+        return "N/A";
+#endif
+        
+        // 格式化：显示已使用/总显存 (GB)
+        double allocated_gb = allocated / (1024.0 * 1024.0 * 1024.0);
+        double total_gb = total / (1024.0 * 1024.0 * 1024.0);
+        int usage_percent = static_cast<int>((allocated / static_cast<double>(total)) * 100.0 + 0.5);
+        
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << allocated_gb 
+            << "/" << std::fixed << std::setprecision(2) << total_gb 
+            << "GB (" << usage_percent << "%)";
+        return oss.str();
+    } catch (const std::exception& e) {
+        return "N/A";
     }
 }
 

@@ -24,7 +24,9 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 option(USE_SENTENCEPIECE "Use SentencePiece library" ON)
 
  
- 
+ add_definitions(-DNOMINMAX 
+                -DUSE_CUDA=1
+                )
 
 
  
@@ -36,7 +38,9 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}
 
 
 if(USE_SENTENCEPIECE)
-        add_definitions(-DUSE_SENTENCEPIECE)
+        add_definitions(-DUSE_SENTENCEPIECE
+                         
+        )
         include_directories(${DEPS_DIR}/sentencepiece/include)  
         message(STATUS "sentencepiece  suppt") 
 endif()
