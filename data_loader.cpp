@@ -27,11 +27,12 @@ Batch::Batch(const std::vector<std::string>& src_text,
     this->src_mask = (this->src != pad).unsqueeze(-2).to(device);
     
     if (trg.defined()) {
-        this->trg = trg.to(device);
-        // decoder输入：去掉最后一个token
-        this->trg = this->trg.slice(1, 0, -1);
-        // decoder输出：从第二个token开始
-        this->trg_y = this->trg.slice(1, 1);
+        // 先在设备上保存完整的trg，然后基于完整trg构造 decoder 输入和输出
+        auto full_trg = trg.to(device);              // 形状: [batch, L]
+        // decoder输入：去掉最后一个token => [batch, L-1]
+        this->trg = full_trg.slice(1, 0, -1);
+        // decoder输出：从第二个token开始 => [batch, L-1]
+        this->trg_y = full_trg.slice(1, 1);
         
         // 创建目标语言mask（包含subsequent mask）
         auto tgt_mask = (this->trg != pad).unsqueeze(-2).to(device);
