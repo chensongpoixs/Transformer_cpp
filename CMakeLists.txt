@@ -25,7 +25,7 @@ option(USE_SENTENCEPIECE "Use SentencePiece library" ON)
 
  
  add_definitions(-DNOMINMAX 
-                -DUSE_CUDA=1
+                -DUSE_CUDA
                 )
 
 

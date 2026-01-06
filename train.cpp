@@ -12,8 +12,12 @@
 #include <limits>
 #include <sstream>
 #include <utility>
+#include <tuple>
 #include <chrono>
 #include <cmath>
+#include <c10/cuda/CUDAGuard.h>
+#include <cuda_runtime.h>
+
 
 namespace fs = std::filesystem;
 using namespace logging;
@@ -65,28 +69,35 @@ static std::pair<std::string, std::string> create_exp_folder_cpp(
 }
 
 /**
- * YOLOv5 风格的进度条显示
- * 格式参考: train: Epoch 0/299, loss=0.1234, GPU_mem=2.45G, time=0.5s, rate=45.2 samples/s
+ * YOLOv5 风格的表格格式实时更新（带进度条）
+ * 格式:   1/100     2.5G   100/20     1.5M      0.1200     0.1420    13.50    45.6s   50%|==========>          |
  */
 static void print_progress_bar(int epoch, int total_epochs,
                                size_t batch_idx, size_t total_batches,
                                float loss, float avg_loss,
                                double speed, double eta,
                                bool is_training,
-                               torch::Device device) {
-    const int bar_width = 40;
+                               torch::Device device, double elapsed_time,
+                               long long current_tokens, size_t current_batches) {
+    // 计算进度条
+    const int bar_width = 20;
     float progress = static_cast<float>(batch_idx + 1) / static_cast<float>(total_batches);
     int filled = static_cast<int>(progress * bar_width);
     int pct = static_cast<int>(progress * 100.0f + 0.5f);
     
-    std::string mode = is_training ? "train" : "val";
-    std::string bar(filled, '=');
-    if (filled < bar_width) {
-        bar += '>';
-        bar += std::string(bar_width - filled - 1, ' ');
+    // 使用ASCII字符构建进度条
+    std::string bar;
+    for (int i = 0; i < bar_width; ++i) {
+        if (i < filled) {
+            bar += '=';
+        } else if (i == filled && filled < bar_width) {
+            bar += '>';
+        } else {
+            bar += ' ';
+        }
     }
     
-    // 获取GPU内存使用情况（简化格式，只显示已使用GB）
+    // 获取GPU内存使用情况
     std::string gpu_mem = "N/A";
     if (device.is_cuda()) {
         try {
@@ -110,20 +121,58 @@ static void print_progress_bar(int epoch, int total_epochs,
         gpu_mem = "0G";
     }
     
-    // YOLOv5风格：train: Epoch 0/299, loss=0.1234, GPU_mem=2.45G, time=0.5s, rate=45.2 samples/s
+    // 格式化批次数量（显示当前批次/总批次）
+    std::ostringstream batch_oss;
+    batch_oss << (batch_idx + 1) << "/" << total_batches;
+    
+    // 格式化tokens数量（使用K/M/G等单位）
+    std::string tokens_str;
+    if (current_tokens >= 1000000000) {
+        std::ostringstream t_oss;
+        t_oss << std::fixed << std::setprecision(1) << (current_tokens / 1000000000.0) << "G";
+        tokens_str = t_oss.str();
+    } else if (current_tokens >= 1000000) {
+        std::ostringstream t_oss;
+        t_oss << std::fixed << std::setprecision(1) << (current_tokens / 1000000.0) << "M";
+        tokens_str = t_oss.str();
+    } else if (current_tokens >= 1000) {
+        std::ostringstream t_oss;
+        t_oss << std::fixed << std::setprecision(1) << (current_tokens / 1000.0) << "K";
+        tokens_str = t_oss.str();
+    } else {
+        tokens_str = std::to_string(current_tokens);
+    }
+    
+    // YOLOv5风格：表格格式输出（与epoch汇总行格式一致）+ 进度条
+    // 格式: train:  1/100      2.5G        100/20      1.5M          0.1200        -         -       45.6s        |==========>          | 50%
+    // YOLOv5风格：所有列左对齐
     std::ostringstream oss;
-    oss << mode << ": "
-        << "Epoch " << std::setw(3) << epoch << "/" << total_epochs
-        << ", loss=" << std::fixed << std::setprecision(4) << avg_loss
-        << ", GPU_mem=" << std::setw(6) << gpu_mem
-        << ", time=" << std::fixed << std::setprecision(1) << elapsed_time << "s"
-        << ", rate=" << std::fixed << std::setprecision(1) << speed << " samples/s"
-        << " [" << bar << "] " << std::setw(3) << pct << "%";
+    oss << "train: "
+        << std::setw(10) << std::left << (std::to_string(epoch) + "/" + std::to_string(total_epochs))
+        << std::setw(12) << std::left << gpu_mem
+        << std::setw(15) << std::left << batch_oss.str()
+        << std::setw(15) << std::left << tokens_str
+        << std::setw(15) << std::left << std::fixed << std::setprecision(4) << avg_loss;
+    
+    // 训练阶段：val_loss和BLEU显示为"-"
+    if (is_training) {
+        oss << std::setw(15) << std::left << "-"
+            << std::setw(10) << std::left << "-";
+    } else {
+        // 验证阶段：显示当前损失（val_loss），BLEU显示为"-"
+        oss << std::setw(15) << std::left << std::fixed << std::setprecision(4) << avg_loss
+            << std::setw(10) << std::left << "-";
+    }
+    
+    oss << std::setw(10) << std::left << std::fixed << std::setprecision(1) << elapsed_time << "s"
+        << std::setw(28) << std::left << ("|" + bar + "| " + std::to_string(pct) + "%");
     
     std::string progress_str = oss.str();
+    
     // 添加空格以清除之前可能更长的行内容
-    if (progress_str.length() < 150) {
-        progress_str += std::string(150 - progress_str.length(), ' ');
+    const int terminal_width = 140;
+    if (progress_str.length() < terminal_width) {
+        progress_str += std::string(terminal_width - progress_str.length(), ' ');
     }
     
     // 使用 \r 覆盖同一行
@@ -135,15 +184,16 @@ static void print_progress_bar(int epoch, int total_epochs,
     }
 }
 
-float run_epoch(MTDataset& dataset,
-                Transformer model,
-                LossCompute& loss_compute,
-                int batch_size,
-                torch::Device device,
-                const TransformerConfig& config,
-                bool is_training,
-                int epoch,
-                int total_epochs) {
+// 返回 (平均损失, 总tokens数, 批次数量)
+std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
+                                                 Transformer model,
+                                                 LossCompute& loss_compute,
+                                                 int batch_size,
+                                                 torch::Device device,
+                                                 const TransformerConfig& config,
+                                                 bool is_training,
+                                                 int epoch,
+                                                 int total_epochs) {
     
     float total_tokens = 0.0f;
     float total_loss = 0.0f;
@@ -181,11 +231,6 @@ float run_epoch(MTDataset& dataset,
     // 按批次处理数据
     size_t num_batches = (indices.size() + batch_size - 1) / batch_size;
     
-    if (is_training) {
-        LOG_INFO("使用长度bucket采样: bucket_size=" + std::to_string(bucket_size) +
-                 ", 总样本数=" + std::to_string(indices.size()) + ", 批次数=" + std::to_string(num_batches));
-    }
-    
     // 计时相关
     auto epoch_start = steady_clock::now();
     size_t processed_samples = 0;
@@ -222,28 +267,28 @@ float run_epoch(MTDataset& dataset,
         
         // 计算速度和剩余时间（使用从 epoch 开始的总时间）
         auto batch_end = steady_clock::now();
-        auto total_elapsed = duration_cast<milliseconds>(batch_end - epoch_start).count() / 1000.0;
-        double speed = (total_elapsed > 0.0) ? (processed_samples / total_elapsed) : 0.0;
+        double elapsed_time = duration_cast<milliseconds>(batch_end - epoch_start).count() / 1000.0;
+        double speed = (elapsed_time > 0.0) ? (processed_samples / elapsed_time) : 0.0;
         
         // 计算平均损失
         float avg_loss_so_far = (total_tokens > 0.0f)
             ? (total_loss / total_tokens)
             : 0.0f;
         
-        // 计算剩余时间（ETA）
+        // 计算剩余时间（ETA）：使用剩余batch数计算更准确
         double eta = 0.0;
         if (speed > 0.0 && i + 1 < num_batches) {
-            size_t remaining_samples = (num_batches - i - 1) * batch_size;
+            size_t remaining_batches = num_batches - i - 1;
+            // 使用平均每个batch的样本数来估算剩余样本数
+            double avg_samples_per_batch = static_cast<double>(processed_samples) / (i + 1);
+            double remaining_samples = remaining_batches * avg_samples_per_batch;
             eta = remaining_samples / speed;
         }
         
-        // 计算已用时间
-        auto batch_end = steady_clock::now();
-        double elapsed_time = duration_cast<milliseconds>(batch_end - epoch_start).count() / 1000.0;
-        
-        // 显示 YOLOv5 风格的进度条（每个 batch 都更新，包含GPU内存信息）
+        // 显示 YOLOv5 风格的表格格式实时更新（每个 batch 都更新）
         print_progress_bar(epoch, total_epochs, i, num_batches,
-                          loss, avg_loss_so_far, speed, eta, is_training, device, elapsed_time);
+                          loss, avg_loss_so_far, speed, eta, is_training, device, elapsed_time,
+                          static_cast<long long>(total_tokens), num_batches);
     }
     
     // 性能分析：在第一个epoch结束后打印
@@ -253,14 +298,16 @@ float run_epoch(MTDataset& dataset,
     }
     
     float avg_loss = (total_tokens > 0.0f) ? (total_loss / total_tokens) : 0.0f;
+    long long total_tokens_long = static_cast<long long>(total_tokens);
     /*{
         std::ostringstream oss;
         oss << (is_training ? "[Train] " : "[Eval] ")
             << "Epoch结束, 平均损失=" << std::fixed << std::setprecision(4) << avg_loss
-            << ", 总token数=" << static_cast<long long>(total_tokens);
+            << ", 总token数=" << total_tokens_long
+            << ", 批次数=" << num_batches;
         LOG_INFO(oss.str());
     }*/
-    return avg_loss;
+    return std::make_tuple(avg_loss, total_tokens_long, num_batches);
 }
 
 void train(MTDataset& train_dataset,
@@ -289,34 +336,56 @@ void train(MTDataset& train_dataset,
     auto loss_compute_eval = LossCompute(model->get_generator(), criterion, nullptr);
     LOG_INFO("LossCompute 对象创建完成（train & eval）");
     
-    // YOLOv5风格：打印表头（只在第一个epoch打印）
-    bool print_header = true;
+    // 计算训练数据集的bucket采样信息（在训练开始前打印）
+    const size_t bucket_size = static_cast<size_t>(config.batch_size) * 4;  // 可调：4 倍batch
+    size_t train_dataset_size = train_dataset.size();
+    size_t train_num_batches = (train_dataset_size + config.batch_size - 1) / config.batch_size;
+    LOG_INFO("使用长度bucket采样: bucket_size=" + std::to_string(bucket_size) +
+             ", 总样本数=" + std::to_string(train_dataset_size) + ", 批次数=" + std::to_string(train_num_batches));
+    
+    // YOLOv5风格：在训练开始前打印表头
+    std::cout << std::endl;
+    // 表头格式：train: Epoch   GPU_mem   Batch      Tokens     train_loss    val_loss     BLEU     time   进度条
+    // 注意：宽度要与实际输出完全一致，进度条部分固定为28个字符（"|====================| 100%"）
+    // YOLOv5风格：表头字段左对齐
+    std::cout << "train: "
+              << std::setw(10) << std::left << "Epoch"
+              << std::setw(12) << std::left << "GPU_mem"
+              << std::setw(15) << std::left << "Batch"
+              << std::setw(15) << std::left << "Tokens"
+              << std::setw(15) << std::left << "train_loss"
+              << std::setw(15) << std::left << "val_loss"
+              << std::setw(10) << std::left << "BLEU"
+              << std::setw(10) << std::left << "time"
+              << std::setw(28) << std::left << "进度条"
+              << std::endl;
     
     // 训练循环
     for (int epoch = 1; epoch <= config.epoch_num; ++epoch) {
-        // YOLOv5风格：打印表头
-        if (print_header) {
-            std::cout << std::endl;
-            std::cout << "Epoch   GPU_mem   train_loss   val_loss   BLEU     time" << std::endl;
-            print_header = false;
-        }
+        // 记录epoch开始时间
+        auto epoch_start_time = std::chrono::steady_clock::now();
         
         // 训练阶段
         model->train();
-        float train_loss = run_epoch(train_dataset, model, loss_compute_train,
-                                    config.batch_size, device, config, true,
-                                    epoch, config.epoch_num);
+        auto [train_loss, train_tokens, train_batches] = run_epoch(train_dataset, model, loss_compute_train,
+                                                                  config.batch_size, device, config, true,
+                                                                  epoch, config.epoch_num);
         
         // 验证阶段
         model->eval();
-        float dev_loss = run_epoch(dev_dataset, model, loss_compute_eval,
-                                  config.batch_size, device, config, false,
-                                  epoch, config.epoch_num);
+        auto [dev_loss, dev_tokens, dev_batches] = run_epoch(dev_dataset, model, loss_compute_eval,
+                                                              config.batch_size, device, config, false,
+                                                              epoch, config.epoch_num);
         
         // 计算BLEU分数（用于监控，但不用于保存模型）
         float bleu_score = evaluate(dev_dataset, model, config, device);
         
-        // 获取GPU内存和训练时间
+        // 计算epoch总时间
+        auto epoch_end_time = std::chrono::steady_clock::now();
+        auto epoch_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            epoch_end_time - epoch_start_time).count() / 1000.0;
+        
+        // 获取GPU内存
         std::string gpu_mem = "N/A";
         if (device.is_cuda()) {
             try {
@@ -341,13 +410,45 @@ void train(MTDataset& train_dataset,
         }
         
         // YOLOv5风格：表格格式输出epoch结果
-        std::ostringstream oss;
-        oss << std::setw(3) << epoch << "/" << config.epoch_num
-            << std::setw(10) << gpu_mem
-            << std::setw(13) << std::fixed << std::setprecision(4) << train_loss
-            << std::setw(11) << std::fixed << std::setprecision(4) << dev_loss
-            << std::setw(9) << std::fixed << std::setprecision(2) << bleu_score;
-        std::cout << oss.str() << std::endl;
+        // 格式对齐表头：Epoch   GPU_mem   Batch   Tokens   train_loss   val_loss   BLEU     time
+        // 示例：       1/100     2.5G   100/20     1.5M      0.1234     0.1456    12.34    45.6s
+        
+        // 格式化批次数量（显示训练和验证的批次，格式：train_batches/val_batches）
+        std::ostringstream batch_oss;
+        batch_oss << train_batches << "/" << dev_batches;
+        
+        // 格式化tokens数量（使用K/M/G等单位）
+        std::string tokens_str;
+        if (train_tokens >= 1000000000) {
+            std::ostringstream t_oss;
+            t_oss << std::fixed << std::setprecision(1) << (train_tokens / 1000000000.0) << "G";
+            tokens_str = t_oss.str();
+        } else if (train_tokens >= 1000000) {
+            std::ostringstream t_oss;
+            t_oss << std::fixed << std::setprecision(1) << (train_tokens / 1000000.0) << "M";
+            tokens_str = t_oss.str();
+        } else if (train_tokens >= 1000) {
+            std::ostringstream t_oss;
+            t_oss << std::fixed << std::setprecision(1) << (train_tokens / 1000.0) << "K";
+            tokens_str = t_oss.str();
+        } else {
+            tokens_str = std::to_string(train_tokens);
+        }
+        
+        // YOLOv5风格：按照示例格式输出：train: 前缀，所有列左对齐，最后添加进度条（|====================| 100%）
+        // 格式要与表头完全对齐
+        std::string full_bar(20, '=');  // 100%进度条
+        std::cout << "train: "
+                  << std::setw(10) << std::left << (std::to_string(epoch) + "/" + std::to_string(config.epoch_num))
+                  << std::setw(12) << std::left << gpu_mem
+                  << std::setw(15) << std::left << batch_oss.str()
+                  << std::setw(15) << std::left << tokens_str
+                  << std::setw(15) << std::left << std::fixed << std::setprecision(4) << train_loss
+                  << std::setw(15) << std::left << std::fixed << std::setprecision(4) << dev_loss
+                  << std::setw(10) << std::left << std::fixed << std::setprecision(2) << bleu_score
+                  << std::setw(10) << std::left << std::fixed << std::setprecision(1) << epoch_duration << "s"
+                  << std::setw(28) << std::left << ("|" + full_bar + "| 100%")
+                  << std::endl;
         
         // YOLOv5 风格：基于验证损失保存最佳模型
         // 如果当前验证损失小于历史最小损失，保存为 best.pth

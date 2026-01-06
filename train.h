@@ -9,6 +9,8 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <utility>
+#include <tuple>
 
 /**
  * 运行一个epoch的训练或验证
@@ -18,17 +20,17 @@
  * @param batch_size 批次大小
  * @param device 设备
  * @param config 配置
- * @return 平均损失
+ * @return (平均损失, 总tokens数, 批次数量)
  */
-float run_epoch(MTDataset& dataset,
-                Transformer model,
-                LossCompute& loss_compute,
-                int batch_size,
-                torch::Device device,
-                const TransformerConfig& config,
-                bool is_training = true,
-                int epoch = 0,
-                int total_epochs = 0);
+std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
+                                                Transformer model,
+                                                LossCompute& loss_compute,
+                                                int batch_size,
+                                                torch::Device device,
+                                                const TransformerConfig& config,
+                                                bool is_training = true,
+                                                int epoch = 0,
+                                                int total_epochs = 0);
 
 /**
  * 训练函数
