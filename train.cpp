@@ -25,20 +25,43 @@ float run_epoch(MTDataset& dataset,
     float total_tokens = 0.0f;
     float total_loss = 0.0f;
     
-    // 创建索引列表
-    std::vector<size_t> indices(dataset.size());
-    std::iota(indices.begin(), indices.end(), 0);
-    
-    // 如果是训练模式，打乱数据
-    if (is_training) {
-        std::random_device rd;
-        std::mt19937 g(rd());
-        std::shuffle(indices.begin(), indices.end(), g);
-        LOG_DEBUG("训练模式：已对样本索引进行随机打乱");
+    // 基于句子长度的 bucket 采样策略
+    // 1. 先按长度排序得到索引
+    std::vector<size_t> base_indices = dataset.make_length_sorted_indices();
+
+    // 2. 按 bucket 切分，再在 bucket 内部打乱
+    std::vector<size_t> indices;
+    indices.reserve(base_indices.size());
+
+    const size_t bucket_size = static_cast<size_t>(batch_size) * 4;  // 可调：4 倍batch
+    std::vector<size_t> bucket;
+    bucket.reserve(bucket_size);
+
+    std::random_device rd;
+    std::mt19937 g(rd());
+
+    for (size_t idx : base_indices) {
+        bucket.push_back(idx);
+        if (bucket.size() >= bucket_size) {
+            // 打乱 bucket 内部的顺序
+            std::shuffle(bucket.begin(), bucket.end(), g);
+            indices.insert(indices.end(), bucket.begin(), bucket.end());
+            bucket.clear();
+        }
     }
-    
+    // 处理最后一个不满的 bucket
+    if (!bucket.empty()) {
+        std::shuffle(bucket.begin(), bucket.end(), g);
+        indices.insert(indices.end(), bucket.begin(), bucket.end());
+    }
+
+    if (is_training) {
+        LOG_INFO("使用长度bucket采样: bucket_size=" + std::to_string(bucket_size) +
+                 ", 总样本数=" + std::to_string(indices.size()));
+    }
+
     // 按批次处理数据
-    size_t num_batches = (dataset.size() + batch_size - 1) / batch_size;
+    size_t num_batches = (indices.size() + batch_size - 1) / batch_size;
     {
         std::ostringstream oss;
         oss << (is_training ? "[Train] " : "[Eval] ")

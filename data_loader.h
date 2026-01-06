@@ -51,6 +51,9 @@ public:
                      torch::Device device,
                      int pad_idx, int bos_idx, int eos_idx,
                      int src_vocab_size, int tgt_vocab_size) const;
+
+    // 根据句子长度生成排序后的索引（用于bucket采样）
+    std::vector<size_t> make_length_sorted_indices() const;
     
     // 设置分词器
     void set_tokenizers(std::shared_ptr<SentencePieceTokenizer> eng_tokenizer,

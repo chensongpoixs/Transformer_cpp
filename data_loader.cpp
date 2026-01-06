@@ -122,6 +122,11 @@ std::vector<size_t> MTDataset::len_argsort(const std::vector<std::string>& sente
     return indices;
 }
 
+// 根据句子长度生成排序后的索引（用于bucket采样）
+std::vector<size_t> MTDataset::make_length_sorted_indices() const {
+    return len_argsort(en_sentences);
+}
+
 MTDataset::MTDataset(const std::string& data_path) {
     LOG_INFO("创建MTDataset, 数据路径: " + data_path);
 
