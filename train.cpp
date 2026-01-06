@@ -11,9 +11,12 @@
 #include <limits>
 #include <sstream>
 #include <utility>
+#include <chrono>
+#include <cmath>
 
 namespace fs = std::filesystem;
 using namespace logging;
+using namespace std::chrono;
 
 // 仿照 Python tools/create_exp_folder.py 的实验目录创建逻辑
 // 返回: (exp_folder, weights_folder)
@@ -60,6 +63,74 @@ static std::pair<std::string, std::string> create_exp_folder_cpp(
     }
 }
 
+/**
+ * YOLOv5 风格的进度条显示
+ * @param epoch 当前 epoch
+ * @param total_epochs 总 epoch 数
+ * @param batch_idx 当前 batch 索引（从0开始）
+ * @param total_batches 总 batch 数
+ * @param loss 当前 batch 的损失
+ * @param avg_loss 平均损失
+ * @param speed 处理速度（samples/s）
+ * @param eta 预计剩余时间（秒）
+ * @param is_training 是否为训练模式
+ */
+static void print_progress_bar(int epoch, int total_epochs,
+                               size_t batch_idx, size_t total_batches,
+                               float loss, float avg_loss,
+                               double speed, double eta,
+                               bool is_training) {
+    const int bar_width = 30;
+    float progress = static_cast<float>(batch_idx + 1) / static_cast<float>(total_batches);
+    int filled = static_cast<int>(progress * bar_width);
+    int pct = static_cast<int>(progress * 100.0f + 0.5f);
+    
+    std::string mode = is_training ? "Train" : "Val";
+    std::string bar(filled, '=');
+    if (filled < bar_width) {
+        bar += '>';
+        bar += std::string(bar_width - filled - 1, ' ');
+    }
+    
+    // 格式化时间
+    auto format_time = [](double seconds) -> std::string {
+        if (seconds < 0) return "?";
+        int h = static_cast<int>(seconds / 3600);
+        int m = static_cast<int>((seconds - h * 3600) / 60);
+        int s = static_cast<int>(seconds - h * 3600 - m * 60);
+        if (h > 0) {
+            return std::to_string(h) + "h" + std::to_string(m) + "m" + std::to_string(s) + "s";
+        } else if (m > 0) {
+            return std::to_string(m) + "m" + std::to_string(s) + "s";
+        } else {
+            return std::to_string(s) + "s";
+        }
+    };
+    
+    std::ostringstream oss;
+    oss << mode << ": " << epoch << "/" << total_epochs
+        << " [" << bar << "] " << std::setw(3) << pct << "%"
+        << " " << std::setw(4) << (batch_idx + 1) << "/" << total_batches
+        << " loss=" << std::fixed << std::setprecision(3) << loss
+        << " avg_loss=" << std::fixed << std::setprecision(3) << avg_loss
+        << " " << std::fixed << std::setprecision(1) << speed << " samples/s"
+        << " ETA=" << format_time(eta);
+    
+    std::string progress_str = oss.str();
+    // 添加空格以清除之前可能更长的行内容（最多120个字符）
+    if (progress_str.length() < 120) {
+        progress_str += std::string(120 - progress_str.length(), ' ');
+    }
+    
+    // 使用 \r 覆盖同一行（Windows 和 Linux 都支持）
+    std::cout << "\r" << progress_str << std::flush;
+    
+    // 如果是最后一个 batch，换行
+    if (batch_idx + 1 == total_batches) {
+        std::cout << std::endl;
+    }
+}
+
 float run_epoch(MTDataset& dataset,
                 Transformer model,
                 LossCompute& loss_compute,
@@ -103,20 +174,18 @@ float run_epoch(MTDataset& dataset,
         indices.insert(indices.end(), bucket.begin(), bucket.end());
     }
 
-    if (is_training) {
-        LOG_INFO("使用长度bucket采样: bucket_size=" + std::to_string(bucket_size) +
-                 ", 总样本数=" + std::to_string(indices.size()));
-    }
-
     // 按批次处理数据
     size_t num_batches = (indices.size() + batch_size - 1) / batch_size;
-    {
-        std::ostringstream oss;
-        oss << (is_training ? "[Train] " : "[Eval] ")
-            << "共 " << num_batches << " 个 batch, batch_size=" << batch_size
-            << ", 样本数=" << dataset.size();
-        LOG_INFO(oss.str());
+    
+    if (is_training) {
+        LOG_INFO("使用长度bucket采样: bucket_size=" + std::to_string(bucket_size) +
+                 ", 总样本数=" + std::to_string(indices.size()) + ", 批次数=" + std::to_string(num_batches));
     }
+    
+    // 计时相关
+    auto epoch_start = steady_clock::now();
+    auto batch_start = steady_clock::now();
+    size_t processed_samples = 0;
     
     for (size_t i = 0; i < num_batches; ++i) {
         size_t start_idx = i * batch_size;
@@ -145,26 +214,28 @@ float run_epoch(MTDataset& dataset,
         // 累加
         total_loss += loss * batch.ntokens;
         total_tokens += batch.ntokens;
+        processed_samples += batch_indices.size();
         
-        // YOLOv5 风格的进度日志（每若干 batch 打一次）
-        if ((i + 1) % 10 == 0 || i == num_batches - 1) {
-            float progress = static_cast<float>(i + 1) / static_cast<float>(num_batches);
-            int pct = static_cast<int>(progress * 100.0f + 0.5f);
-
-            float avg_loss_so_far = (total_tokens > 0.0f)
-                ? (total_loss / total_tokens)
-                : 0.0f;
-
-            std::ostringstream oss;
-            oss << (is_training ? "Train" : "Val")
-                << " | Epoch " << epoch << "/" << total_epochs
-                << " | Batch " << (i + 1) << "/" << num_batches
-                << " (" << std::setw(3) << pct << "%)"
-                << " | Loss " << std::fixed << std::setprecision(3) << loss
-                << " | AvgLoss " << std::fixed << std::setprecision(3) << avg_loss_so_far
-                << " | Tokens " << static_cast<long long>(total_tokens);
-            LOG_INFO(oss.str());
+        // 计算速度和剩余时间（使用从 epoch 开始的总时间）
+        auto batch_end = steady_clock::now();
+        auto total_elapsed = duration_cast<milliseconds>(batch_end - epoch_start).count() / 1000.0;
+        double speed = (total_elapsed > 0.0) ? (processed_samples / total_elapsed) : 0.0;
+        
+        // 计算平均损失
+        float avg_loss_so_far = (total_tokens > 0.0f)
+            ? (total_loss / total_tokens)
+            : 0.0f;
+        
+        // 计算剩余时间（ETA）
+        double eta = 0.0;
+        if (speed > 0.0 && i + 1 < num_batches) {
+            size_t remaining_samples = (num_batches - i - 1) * batch_size;
+            eta = remaining_samples / speed;
         }
+        
+        // 显示 YOLOv5 风格的进度条（每个 batch 都更新）
+        print_progress_bar(epoch, total_epochs, i, num_batches,
+                          loss, avg_loss_so_far, speed, eta, is_training);
     }
     
     float avg_loss = (total_tokens > 0.0f) ? (total_loss / total_tokens) : 0.0f;
