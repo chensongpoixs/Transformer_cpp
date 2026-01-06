@@ -56,8 +56,8 @@ public:
 
 private:
     torch::nn::ModuleList layers;
-    //LayerNorm norm;
-    torch::nn::LayerNorm norm;
+    LayerNorm norm;
+   // torch::nn::LayerNorm norm;
     int d_model;
     int h;
     int d_ff;

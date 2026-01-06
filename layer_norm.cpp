@@ -1,65 +1,52 @@
 #include "layer_norm.h"
-//
-//LayerNormImpl::LayerNormImpl(int features, float eps)
-//    : eps(eps) {
-//    // 初始化α为全1, 而β为全0，并注册为可训练参数
-//    // 使用register_parameter来注册参数，它会返回一个torch::Tensor引用
-//    a_2 = register_parameter("a_2", torch::ones(features));
-//    b_2 = register_parameter("b_2", torch::zeros(features));
-//}
-//
-//torch::Tensor LayerNormImpl::forward(torch::Tensor x) {
-//    // 计算均值和标准差（keepdim=True保持维度）
-//    // x的形状: [batch_size, seq_len, d_model] 例如 [2, 10, 512]
-//    // 在最后一个维度上计算均值和标准差
-//    // Python版本: mean = x.mean(-1, keepdim=True), std = x.std(-1, keepdim=True)
-//    
-//    // 使用维度列表，-1表示最后一个维度
-//    std::vector<int64_t> dims = {-1};
-//    
-//    // 计算均值，keepdim=true保持维度
-//    auto mean = x.mean(dims, true);  // [batch_size, seq_len, 1] 例如 [2, 10, 1]
-//    
-//    // 计算标准差（使用有偏估计，与PyTorch的LayerNorm一致）
-//    // unbiased=false表示有偏估计（除以n而不是n-1）
-//    // Python版本: std = x.std(-1, keepdim=True) 默认使用有偏估计
-//    auto std = x.std(dims, true, false);  // [batch_size, seq_len, 1]
-//    
-//    // Layer Norm公式: y = a * (x - mean) / sqrt(std^2 + eps) + b
-//    // 其中a和b是可学习的参数，eps是为了防止除以0的小常数
-//    // Python版本: (x - mean) / torch.sqrt(std ** 2 + self.eps)
-//    
-//    // 确保a_2和b_2在正确的设备上
-//    auto a_2_device = a_2.to(x.device());
-//    auto b_2_device = b_2.to(x.device());
-//    
-//    // 计算归一化部分: (x - mean) / sqrt(std^2 + eps)
-//    // x - mean: [batch, seq_len, d_model] - [batch, seq_len, 1] -> [batch, seq_len, d_model] (广播)
-//    // std: [batch, seq_len, 1]，需要先平方再加eps再开方
-//    auto normalized = (x - mean) / torch::sqrt(std * std + eps);
-//    
-//    // 应用缩放和偏移: a_2 * normalized + b_2
-//    // normalized的形状: [batch, seq_len, d_model] 例如 [2, 10, 512]
-//    // a_2和b_2的形状: [d_model] 例如 [512]
-//    // 为了确保正确广播，我们需要将a_2和b_2 reshape为可以广播的形状
-//    // 对于3D输入 [batch, seq_len, d_model]，我们需要 [1, 1, d_model]
-//    
-//    // 使用unsqueeze添加前导维度，使其能够正确广播
-//    // a_2: [d_model] -> unsqueeze(0) -> [1, d_model] -> unsqueeze(0) -> [1, 1, d_model]
-//    int ndim = x.dim();
-//    auto a_2_reshaped = a_2_device;
-//    auto b_2_reshaped = b_2_device;
-//    
-//    // 添加前导维度直到维度数匹配
-//    for (int i = 0; i < ndim - 1; ++i) {
-//        a_2_reshaped = a_2_reshaped.unsqueeze(0);
-//        b_2_reshaped = b_2_reshaped.unsqueeze(0);
-//    }
-//    
-//    // 现在 a_2_reshaped 和 b_2_reshaped 的形状是 [1, 1, d_model] (对于3D输入)
-//    // 可以正确广播到 [batch, seq_len, d_model]
-//    return a_2_reshaped * normalized + b_2_reshaped;
-//}
+
+LayerNormImpl::LayerNormImpl(int features, float eps)
+    : eps(eps) {
+    // 初始化α为全1, 而β为全0，并注册为可训练参数
+    // 使用register_parameter来注册参数，它会返回一个torch::Tensor引用
+    a_2 = register_parameter("a_2", torch::ones(features));
+    b_2 = register_parameter("b_2", torch::zeros(features));
+}
+
+torch::Tensor LayerNormImpl::forward(torch::Tensor x) {
+    // 计算均值和标准差（keepdim=True保持维度）
+    // x的形状: [batch_size, seq_len, d_model] 例如 [2, 10, 512]
+    // 在最后一个维度上计算均值和标准差
+    // Python版本: mean = x.mean(-1, keepdim=True), std = x.std(-1, keepdim=True)
+    
+    // 计算均值和标准差（keepdim=True保持维度）
+    // 使用-1表示最后一个维度，与Python版本一致
+    auto mean = x.mean(-1, true);  // [batch_size, seq_len, 1] 例如 [2, 10, 1]
+    
+    // 手动计算方差和标准差，确保形状正确
+    // 方差 = mean((x - mean)^2)，使用有偏估计
+    auto x_centered = x - mean;  // [batch_size, seq_len, d_model] - [batch_size, seq_len, 1] -> [batch_size, seq_len, d_model]
+    auto var = (x_centered * x_centered).mean(-1, true);  // [batch_size, seq_len, 1]
+    auto std = torch::sqrt(var + eps);  // [batch_size, seq_len, 1]
+    
+    // Layer Norm公式: y = a * (x - mean) / sqrt(std^2 + eps) + b
+    // 其中a和b是可学习的参数，eps是为了防止除以0的小常数
+    // Python版本: (x - mean) / torch.sqrt(std ** 2 + self.eps)
+    
+    // 计算归一化部分: (x - mean) / sqrt(std^2 + eps)
+    // x的形状: [batch, seq_len, d_model] = [2, 10, 512]
+    // mean的形状: [batch, seq_len, 1] = [2, 10, 1]
+    // std的形状: [batch, seq_len, 1] = [2, 10, 1]
+    // (x - mean) 应该得到 [2, 10, 512] (广播)
+    // std * std + eps 应该得到 [2, 10, 1]
+    // 除法应该得到 [2, 10, 512]
+    auto normalized = (x - mean) / torch::sqrt(std * std + eps);
+
+    // 应用缩放和偏移，a_2和b_2会自动广播
+    // 确保a_2和b_2在正确的设备上
+    auto a_2_device = a_2.to(x.device());
+    auto b_2_device = b_2.to(x.device());
+
+    return a_2_device * normalized + b_2_device;
+    
+
+    
+}
 
 
 

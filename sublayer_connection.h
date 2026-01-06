@@ -18,8 +18,8 @@ public:
     torch::Tensor forward(torch::Tensor x, std::function<torch::Tensor(torch::Tensor)> sublayer);
 
 private:
-    //LayerNorm norm;
-    torch::nn::LayerNorm norm;
+    LayerNorm norm;
+   // torch::nn::LayerNorm norm;
     torch::nn::Dropout dropout;
 };
 

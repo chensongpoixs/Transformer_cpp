@@ -6,29 +6,32 @@
 /**
  * 层归一化实现
  */
-//class LayerNormImpl : public torch::nn::Module {
-//public:
-//    LayerNormImpl(int features, float eps = 1e-6f);
-//    //前向传播函数
-//    torch::Tensor forward(torch::Tensor x);
-//
-//private:
-//    torch::Tensor a_2;  // 缩放参数（初始化为1）
-//    torch::Tensor b_2;  // 偏移参数（初始化为0）
-//    float eps;          // 平滑项
-//};
-//
-//
-//
-//
-//
-//TORCH_MODULE(LayerNorm);
-#include <iostream>
-#include <vector>
-#include <cmath>
-#include <algorithm>
+class LayerNormImpl : public torch::nn::Module {
+public:
+    LayerNormImpl(int features, float eps = 1e-6f);
+    //前向传播函数
+    torch::Tensor forward(torch::Tensor x);
 
-using namespace std;
+private:
+    torch::Tensor a_2;  // 缩放参数（初始化为1）
+    torch::Tensor b_2;  // 偏移参数（初始化为0）
+    float eps;          // 平滑项
+};
+
+
+
+
+
+TORCH_MODULE(LayerNorm);
+
+
+
+//#include <iostream>
+//#include <vector>
+//#include <cmath>
+//#include <algorithm>
+//
+//using namespace std;
 /*
 
 代码解释:

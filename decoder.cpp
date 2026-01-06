@@ -55,8 +55,8 @@ torch::Tensor DecoderLayerImpl::forward(
 
 // Decoder实现（使用layer模板）
 DecoderImpl::DecoderImpl(DecoderLayer layer, int N)
-    : norm(torch::nn::LayerNorm(torch::nn::LayerNormOptions({ layer->laysize() }))),
-      //norm(LayerNorm(layer->laysize())),
+    //: norm(torch::nn::LayerNorm(torch::nn::LayerNormOptions({ layer->laysize() }))),
+      :norm(LayerNorm(layer->laysize())),
       d_model(layer->laysize()),
       h(8),  // 默认值，应该从配置获取
       d_ff(2048),  // 默认值，应该从配置获取
@@ -76,8 +76,8 @@ DecoderImpl::DecoderImpl(DecoderLayer layer, int N)
 
 // Decoder实现（直接使用参数）
 DecoderImpl::DecoderImpl(int d_model, int h, int d_ff, float dropout, int N)
-    : norm(torch::nn::LayerNorm(torch::nn::LayerNormOptions({ d_model }))),
-   // : norm(LayerNorm(d_model)),
+   // : norm(torch::nn::LayerNorm(torch::nn::LayerNormOptions({ d_model }))),
+    : norm(LayerNorm(d_model)),
       d_model(d_model),
       h(h),
       d_ff(d_ff),

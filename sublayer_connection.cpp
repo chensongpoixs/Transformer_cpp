@@ -1,8 +1,8 @@
 #include "sublayer_connection.h"
 
 SublayerConnectionImpl::SublayerConnectionImpl(int size, float dropout)
-    : norm(torch::nn::LayerNorm(torch::nn::LayerNormOptions({ size }))),
-    //: norm(LayerNorm(size)),
+    //: norm(torch::nn::LayerNorm(torch::nn::LayerNormOptions({ size }))),
+    : norm(LayerNorm(size)),
     dropout(torch::nn::DropoutOptions(dropout)) {
     register_module("norm", norm);
     register_module("dropout", this->dropout);
