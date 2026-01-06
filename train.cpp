@@ -66,16 +66,7 @@ static std::pair<std::string, std::string> create_exp_folder_cpp(
 
 /**
  * YOLOv5 风格的进度条显示
- * @param epoch 当前 epoch
- * @param total_epochs 总 epoch 数
- * @param batch_idx 当前 batch 索引（从0开始）
- * @param total_batches 总 batch 数
- * @param loss 当前 batch 的损失
- * @param avg_loss 平均损失
- * @param speed 处理速度（samples/s）
- * @param eta 预计剩余时间（秒）
- * @param is_training 是否为训练模式
- * @param device GPU设备（用于显示显存使用）
+ * 格式参考: train: Epoch 0/299, loss=0.1234, GPU_mem=2.45G, time=0.5s, rate=45.2 samples/s
  */
 static void print_progress_bar(int epoch, int total_epochs,
                                size_t batch_idx, size_t total_batches,
@@ -83,53 +74,59 @@ static void print_progress_bar(int epoch, int total_epochs,
                                double speed, double eta,
                                bool is_training,
                                torch::Device device) {
-    const int bar_width = 30;
+    const int bar_width = 40;
     float progress = static_cast<float>(batch_idx + 1) / static_cast<float>(total_batches);
     int filled = static_cast<int>(progress * bar_width);
     int pct = static_cast<int>(progress * 100.0f + 0.5f);
     
-    std::string mode = is_training ? "Train" : "Val";
+    std::string mode = is_training ? "train" : "val";
     std::string bar(filled, '=');
     if (filled < bar_width) {
         bar += '>';
         bar += std::string(bar_width - filled - 1, ' ');
     }
     
-    // 格式化时间
-    auto format_time = [](double seconds) -> std::string {
-        if (seconds < 0) return "?";
-        int h = static_cast<int>(seconds / 3600);
-        int m = static_cast<int>((seconds - h * 3600) / 60);
-        int s = static_cast<int>(seconds - h * 3600 - m * 60);
-        if (h > 0) {
-            return std::to_string(h) + "h" + std::to_string(m) + "m" + std::to_string(s) + "s";
-        } else if (m > 0) {
-            return std::to_string(m) + "m" + std::to_string(s) + "s";
-        } else {
-            return std::to_string(s) + "s";
+    // 获取GPU内存使用情况（简化格式，只显示已使用GB）
+    std::string gpu_mem = "N/A";
+    if (device.is_cuda()) {
+        try {
+            c10::cuda::CUDAGuard guard(device);
+            size_t allocated = 0;
+            size_t total = 0;
+#ifdef USE_CUDA
+            size_t free = 0;
+            if (cudaMemGetInfo(&free, &total) == cudaSuccess) {
+                allocated = total - free;
+                double allocated_gb = allocated / (1024.0 * 1024.0 * 1024.0);
+                std::ostringstream gpu_oss;
+                gpu_oss << std::fixed << std::setprecision(1) << allocated_gb << "G";
+                gpu_mem = gpu_oss.str();
+            }
+#endif
+        } catch (...) {
+            gpu_mem = "N/A";
         }
-    };
-    
-    // 获取GPU内存使用情况
-    std::string gpu_mem = GPUProfiler::get_gpu_memory_str(device);
-    
-    std::ostringstream oss;
-    oss << mode << ": " << epoch << "/" << total_epochs
-        << " [" << bar << "] " << std::setw(3) << pct << "%"
-        << " " << std::setw(4) << (batch_idx + 1) << "/" << total_batches
-        << " GPU=" << gpu_mem
-        << " loss=" << std::fixed << std::setprecision(3) << loss
-        << " avg_loss=" << std::fixed << std::setprecision(3) << avg_loss
-        << " " << std::fixed << std::setprecision(1) << speed << " samples/s"
-        << " ETA=" << format_time(eta);
-    
-    std::string progress_str = oss.str();
-    // 添加空格以清除之前可能更长的行内容（最多120个字符）
-    if (progress_str.length() < 120) {
-        progress_str += std::string(120 - progress_str.length(), ' ');
+    } else {
+        gpu_mem = "0G";
     }
     
-    // 使用 \r 覆盖同一行（Windows 和 Linux 都支持）
+    // YOLOv5风格：train: Epoch 0/299, loss=0.1234, GPU_mem=2.45G, time=0.5s, rate=45.2 samples/s
+    std::ostringstream oss;
+    oss << mode << ": "
+        << "Epoch " << std::setw(3) << epoch << "/" << total_epochs
+        << ", loss=" << std::fixed << std::setprecision(4) << avg_loss
+        << ", GPU_mem=" << std::setw(6) << gpu_mem
+        << ", time=" << std::fixed << std::setprecision(1) << elapsed_time << "s"
+        << ", rate=" << std::fixed << std::setprecision(1) << speed << " samples/s"
+        << " [" << bar << "] " << std::setw(3) << pct << "%";
+    
+    std::string progress_str = oss.str();
+    // 添加空格以清除之前可能更长的行内容
+    if (progress_str.length() < 150) {
+        progress_str += std::string(150 - progress_str.length(), ' ');
+    }
+    
+    // 使用 \r 覆盖同一行
     std::cout << "\r" << progress_str << std::flush;
     
     // 如果是最后一个 batch，换行
@@ -191,7 +188,6 @@ float run_epoch(MTDataset& dataset,
     
     // 计时相关
     auto epoch_start = steady_clock::now();
-    auto batch_start = steady_clock::now();
     size_t processed_samples = 0;
     
     for (size_t i = 0; i < num_batches; ++i) {
@@ -241,9 +237,13 @@ float run_epoch(MTDataset& dataset,
             eta = remaining_samples / speed;
         }
         
+        // 计算已用时间
+        auto batch_end = steady_clock::now();
+        double elapsed_time = duration_cast<milliseconds>(batch_end - epoch_start).count() / 1000.0;
+        
         // 显示 YOLOv5 风格的进度条（每个 batch 都更新，包含GPU内存信息）
         print_progress_bar(epoch, total_epochs, i, num_batches,
-                          loss, avg_loss_so_far, speed, eta, is_training, device);
+                          loss, avg_loss_so_far, speed, eta, is_training, device, elapsed_time);
     }
     
     // 性能分析：在第一个epoch结束后打印
@@ -289,38 +289,26 @@ void train(MTDataset& train_dataset,
     auto loss_compute_eval = LossCompute(model->get_generator(), criterion, nullptr);
     LOG_INFO("LossCompute 对象创建完成（train & eval）");
     
+    // YOLOv5风格：打印表头（只在第一个epoch打印）
+    bool print_header = true;
+    
     // 训练循环
     for (int epoch = 1; epoch <= config.epoch_num; ++epoch) {
-        {
-            std::ostringstream oss;
-            oss << "========== Epoch " << epoch << "/" << config.epoch_num << " ==========";
-            LOG_INFO(oss.str());
+        // YOLOv5风格：打印表头
+        if (print_header) {
+            std::cout << std::endl;
+            std::cout << "Epoch   GPU_mem   train_loss   val_loss   BLEU     time" << std::endl;
+            print_header = false;
         }
         
         // 训练阶段
         model->train();
-        {
-            std::ostringstream oss;
-            oss << "开始训练阶段...";
-            if (device.is_cuda()) {
-                oss << " GPU显存: " << GPUProfiler::get_gpu_memory_str(device);
-            }
-            LOG_INFO(oss.str());
-        }
         float train_loss = run_epoch(train_dataset, model, loss_compute_train,
                                     config.batch_size, device, config, true,
                                     epoch, config.epoch_num);
         
         // 验证阶段
         model->eval();
-        {
-            std::ostringstream oss;
-            oss << "开始验证阶段...";
-            if (device.is_cuda()) {
-                oss << " GPU显存: " << GPUProfiler::get_gpu_memory_str(device);
-            }
-            LOG_INFO(oss.str());
-        }
         float dev_loss = run_epoch(dev_dataset, model, loss_compute_eval,
                                   config.batch_size, device, config, false,
                                   epoch, config.epoch_num);
@@ -328,14 +316,38 @@ void train(MTDataset& train_dataset,
         // 计算BLEU分数（用于监控，但不用于保存模型）
         float bleu_score = evaluate(dev_dataset, model, config, device);
         
-        {
-            std::ostringstream oss;
-            oss << "Epoch " << epoch
-                << " - TrainLoss=" << std::fixed << std::setprecision(3) << train_loss
-                << ", ValLoss=" << std::fixed << std::setprecision(3) << dev_loss
-                << ", BLEU=" << std::fixed << std::setprecision(2) << bleu_score;
-            LOG_INFO(oss.str());
+        // 获取GPU内存和训练时间
+        std::string gpu_mem = "N/A";
+        if (device.is_cuda()) {
+            try {
+                c10::cuda::CUDAGuard guard(device);
+                size_t allocated = 0;
+                size_t total = 0;
+#ifdef USE_CUDA
+                size_t free = 0;
+                if (cudaMemGetInfo(&free, &total) == cudaSuccess) {
+                    allocated = total - free;
+                    double allocated_gb = allocated / (1024.0 * 1024.0 * 1024.0);
+                    std::ostringstream gpu_oss;
+                    gpu_oss << std::fixed << std::setprecision(1) << allocated_gb << "G";
+                    gpu_mem = gpu_oss.str();
+                }
+#endif
+            } catch (...) {
+                gpu_mem = "N/A";
+            }
+        } else {
+            gpu_mem = "0G";
         }
+        
+        // YOLOv5风格：表格格式输出epoch结果
+        std::ostringstream oss;
+        oss << std::setw(3) << epoch << "/" << config.epoch_num
+            << std::setw(10) << gpu_mem
+            << std::setw(13) << std::fixed << std::setprecision(4) << train_loss
+            << std::setw(11) << std::fixed << std::setprecision(4) << dev_loss
+            << std::setw(9) << std::fixed << std::setprecision(2) << bleu_score;
+        std::cout << oss.str() << std::endl;
         
         // YOLOv5 风格：基于验证损失保存最佳模型
         // 如果当前验证损失小于历史最小损失，保存为 best.pth
