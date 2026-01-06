@@ -40,6 +40,11 @@ struct TransformerConfig {
     std::string test_data_path = "./data/json/test.json";
     std::string model_path = "./weights/transformer_model.pth";
     
+    // 分词器路径
+    std::string tokenizer_dir = "./tokenizer";  // 分词器目录
+    std::string tokenizer_eng = "./tokenizer/eng.model";  // 英文分词器模型路径
+    std::string tokenizer_chn = "./tokenizer/chn.model";  // 中文分词器模型路径
+    
     // YOLOv5 风格配置
     std::string project = "run/train";  // 项目目录（类似 YOLOv5 的 --project）
     std::string name = "exp";           // 实验名称（类似 YOLOv5 的 --name）

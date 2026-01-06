@@ -299,8 +299,8 @@ float evaluate(MTDataset& dataset,
                Transformer model,
                const TransformerConfig& config,
                torch::Device device) {
-    // 加载中文分词器用于解码
-    auto sp_chn = chinese_tokenizer_load();
+    // 使用配置的中文分词器路径加载分词器用于解码
+    auto sp_chn = chinese_tokenizer_load(config.tokenizer_chn);
     
     model->eval();
     torch::NoGradGuard no_grad;

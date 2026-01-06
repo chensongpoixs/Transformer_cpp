@@ -82,14 +82,26 @@ private:
 };
 
 /**
- * 加载英文分词器
+ * 加载英文分词器（使用默认路径）
  */
 std::shared_ptr<SentencePieceTokenizer> english_tokenizer_load();
 
 /**
- * 加载中文分词器
+ * 加载中文分词器（使用默认路径）
  */
 std::shared_ptr<SentencePieceTokenizer> chinese_tokenizer_load();
+
+/**
+ * 加载英文分词器（指定路径）
+ * @param model_path 分词器模型文件路径
+ */
+std::shared_ptr<SentencePieceTokenizer> english_tokenizer_load(const std::string& model_path);
+
+/**
+ * 加载中文分词器（指定路径）
+ * @param model_path 分词器模型文件路径
+ */
+std::shared_ptr<SentencePieceTokenizer> chinese_tokenizer_load(const std::string& model_path);
 
 #endif // TRANSFORMER_TOKENIZER_WRAPPER_H
 

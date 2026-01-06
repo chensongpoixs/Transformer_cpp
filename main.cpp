@@ -5,6 +5,7 @@
 #include "train.h"
 #include "train_utils.h"
 #include "data_loader.h"
+#include "tokenizer_wrapper.h"
 #include "logger.h"
 #include <memory>
 #include <iomanip>
@@ -78,6 +79,18 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
             if (auto v = next(i)) config.workers = std::stoi(v);
         } else if (arg == "--exist-ok") {
             config.exist_ok = true;
+        } else if (arg == "--tokenizer-dir") {
+            if (auto v = next(i)) {
+                config.tokenizer_dir = v;
+                // 如果只指定了目录，自动拼接默认文件名
+                fs::path base(v);
+                config.tokenizer_eng = (base / "eng.model").string();
+                config.tokenizer_chn = (base / "chn.model").string();
+            }
+        } else if (arg == "--tokenizer-eng") {
+            if (auto v = next(i)) config.tokenizer_eng = v;
+        } else if (arg == "--tokenizer-chn") {
+            if (auto v = next(i)) config.tokenizer_chn = v;
         } else if (arg == "--help" || arg == "-h") {
             show_help = true;
         } else {
@@ -109,6 +122,11 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
         LOG_INFO("  --project <path>           项目目录 (默认: " + config.project + ")");
         LOG_INFO("  --name <str>               实验名称 (默认: " + config.name + ")");
         LOG_INFO("  --exist-ok                 如果实验目录已存在则覆盖");
+        LOG_INFO("");
+        LOG_INFO("分词器相关:");
+        LOG_INFO("  --tokenizer-dir <path>      分词器目录 (默认: " + config.tokenizer_dir + ")");
+        LOG_INFO("  --tokenizer-eng <path>      英文分词器模型路径 (默认: " + config.tokenizer_eng + ")");
+        LOG_INFO("  --tokenizer-chn <path>      中文分词器模型路径 (默认: " + config.tokenizer_chn + ")");
         LOG_INFO("");
         LOG_INFO("其他:");
         LOG_INFO("  --device <int|cpu>         设备 (默认: " + std::to_string(config.device_id) + ", 或 'cpu')");
@@ -146,6 +164,11 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
         LOG_INFO("  dev_data_path   = " + config.dev_data_path);
         LOG_INFO("  test_data_path  = " + config.test_data_path);
     }
+    
+    // 输出分词器路径信息
+    LOG_INFO("分词器路径:");
+    LOG_INFO("  tokenizer_eng = " + config.tokenizer_eng);
+    LOG_INFO("  tokenizer_chn = " + config.tokenizer_chn);
     
     return true;  // 返回 true 表示继续执行程序
 }
@@ -193,6 +216,16 @@ int main(int argc, char* argv[]) {
         LOG_INFO("开始加载数据集...");
         MTDataset train_dataset(config.train_data_path);
         MTDataset dev_dataset(config.dev_data_path);
+        
+        // 使用配置的分词器路径加载分词器
+        LOG_INFO("加载分词器...");
+        auto eng_tokenizer = english_tokenizer_load(config.tokenizer_eng);
+        auto chn_tokenizer = chinese_tokenizer_load(config.tokenizer_chn);
+        
+        // 为数据集设置分词器
+        train_dataset.set_tokenizers(eng_tokenizer, chn_tokenizer);
+        dev_dataset.set_tokenizers(eng_tokenizer, chn_tokenizer);
+        
         {
             std::ostringstream oss;
             oss << "数据集加载完成: 训练集样本数=" << train_dataset.size()

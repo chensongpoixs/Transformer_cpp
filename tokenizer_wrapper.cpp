@@ -142,18 +142,24 @@ std::string SentencePieceTokenizer::decode_simple(const std::vector<int>& ids) {
 }
 
 std::shared_ptr<SentencePieceTokenizer> english_tokenizer_load() {
+    return english_tokenizer_load("./tokenizer/eng.model");
+}
+
+std::shared_ptr<SentencePieceTokenizer> chinese_tokenizer_load() {
+    return chinese_tokenizer_load("./tokenizer/chn.model");
+}
+
+std::shared_ptr<SentencePieceTokenizer> english_tokenizer_load(const std::string& model_path) {
     auto tokenizer = std::make_shared<SentencePieceTokenizer>();
     // 尝试加载英文模型
-    std::string model_path = "./tokenizer/eng.model";
     tokenizer->load(model_path);
     LOG_INFO(std::string("英文分词器初始化完成，模型: ") + model_path);
     return tokenizer;
 }
 
-std::shared_ptr<SentencePieceTokenizer> chinese_tokenizer_load() {
+std::shared_ptr<SentencePieceTokenizer> chinese_tokenizer_load(const std::string& model_path) {
     auto tokenizer = std::make_shared<SentencePieceTokenizer>();
     // 尝试加载中文模型
-    std::string model_path = "./tokenizer/chn.model";
     tokenizer->load(model_path);
     LOG_INFO(std::string("中文分词器初始化完成，模型: ") + model_path);
     return tokenizer;
