@@ -8,7 +8,11 @@
 #include <ctime>
 #include <sstream>
 
-// 简单日志系统：输出到标准输出，带时间戳和级别
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+// 简单日志系统：输出到标准输出，带时间戳和级别，支持颜色
 namespace logging {
 
 enum class Level {
@@ -23,6 +27,9 @@ public:
     // 初始化日志系统，默认级别为 Info
     static void init(Level level = Level::Info);
     static void set_level(Level level);
+    
+    // 启用/禁用颜色输出
+    static void enable_color(bool enable = true);
 
     static void debug(const std::string& msg);
     static void info(const std::string& msg);
@@ -31,9 +38,14 @@ public:
 
 private:
     static void log(Level level, const std::string& msg);
+    static void enable_ansi_on_windows();
+    static std::string get_color_code(Level level);
+    static std::string get_reset_code();
 
     static std::mutex mutex_;
     static Level current_level_;
+    static bool color_enabled_;
+    static bool ansi_enabled_;
 };
 
 // 便捷宏
