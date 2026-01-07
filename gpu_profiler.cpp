@@ -47,6 +47,7 @@
 #include <mutex>
 #include <limits>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include <cuda_runtime.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -200,12 +201,12 @@ void GPUProfiler::print_gpu_memory(torch::Device device) {
         size_t allocated = 0;
         size_t cached = 0;
         
-      /*  try {
-            auto stats = torch::cuda::memory_stats(device.index());
-            allocated = stats.allocated_bytes.all.current;
-            cached = stats.reserved_bytes.all.current;
-        } catch (...) */
-        {
+        // 使用 c10::cuda::CUDACachingAllocator::getDeviceStats 获取内存统计
+        try {
+            auto stats = get_memory_stats(device);
+            allocated = stats.allocated_bytes_current;
+            cached = stats.reserved_bytes_current;
+        } catch (...) {
 #ifdef USE_CUDA
             // 如果获取失败，尝试使用CUDA API
             size_t free = 0;
@@ -279,5 +280,49 @@ std::string GPUProfiler::get_gpu_memory_str(torch::Device device) {
     } catch (const std::exception& e) {
         return "N/A";
     }
+}
+
+GPUProfiler::MemoryStats GPUProfiler::get_memory_stats(torch::Device device) {
+    MemoryStats stats = {0, 0, 0, 0};
+    
+    if (!device.is_cuda()) {
+        return stats;
+    }
+    
+    try {
+        c10::cuda::CUDAGuard guard(device);
+        
+        // 使用 c10::cuda::CUDACachingAllocator::getDeviceStats 获取内存统计
+        // 这是 LibTorch C++ 中获取 CUDA 内存统计的底层 API
+        // 对应 Python 中的 torch.cuda.memory_stats()
+        auto device_stats = c10::cuda::CUDACachingAllocator::getDeviceStats(device.index());
+        
+        // DeviceStats 结构体包含多个统计项
+        // 使用 StatType::AGGREGATE 获取聚合统计（对应 Python 中的 "all"）
+        using StatType = c10::CachingAllocator::StatType;
+        size_t aggregate_idx = static_cast<size_t>(StatType::AGGREGATE);
+        
+        // allocated_bytes.all.current - 当前已分配的字节数
+        stats.allocated_bytes_current = static_cast<size_t>(
+            device_stats.allocated_bytes[aggregate_idx].current);
+        
+        // reserved_bytes.all.current - 当前已保留的字节数
+        stats.reserved_bytes_current = static_cast<size_t>(
+            device_stats.reserved_bytes[aggregate_idx].current);
+        
+        // allocated_bytes.all.peak - 峰值已分配的字节数
+        stats.allocated_bytes_peak = static_cast<size_t>(
+            device_stats.allocated_bytes[aggregate_idx].peak);
+        
+        // reserved_bytes.all.peak - 峰值已保留的字节数
+        stats.reserved_bytes_peak = static_cast<size_t>(
+            device_stats.reserved_bytes[aggregate_idx].peak);
+        
+    } catch (const std::exception& e) {
+        // 如果获取失败，返回全零的统计信息
+        // 调用者应该检查返回值
+    }
+    
+    return stats;
 }
 

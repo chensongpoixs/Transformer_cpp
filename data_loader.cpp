@@ -63,6 +63,8 @@ Batch::Batch(const std::vector<std::string>& src_text,
              torch::Device device)
     : src_text(src_text), trg_text(trg_text) {
     
+    //torch::util::crc64();
+    
     // 移动到指定设备
     this->src = src.to(device);
     
@@ -145,8 +147,8 @@ void MTDataset::load_data(const std::string& data_path) {
         sorted_en.push_back(en_sentences[idx]);
         sorted_cn.push_back(cn_sentences[idx]);
     }
-    en_sentences = sorted_en;
-    cn_sentences = sorted_cn;
+    en_sentences = std::move(sorted_en);
+    cn_sentences = std::move(sorted_cn);
 
     {
         std::ostringstream oss;

@@ -241,6 +241,9 @@ int main(int argc, char* argv[]) {
     TransformerConfig config;
     if (!parse_args(argc, argv, config)) {
         // 如果 parse_args 返回 false（例如用户请求 --help），则退出
+        // 修复日志中bug 
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+       // printf("==\n");
         return 0;
     }
     

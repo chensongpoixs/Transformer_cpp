@@ -341,7 +341,12 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
     
     // 基于句子长度的 bucket 采样策略
     // 1. 先按长度排序得到索引
+    LOG_DEBUG("开始 bucket 采样: 数据集大小=" + std::to_string(dataset.size()));
+    auto bucket_start_time = steady_clock::now();
     std::vector<size_t> base_indices = dataset.make_length_sorted_indices();
+    auto bucket_end_time = steady_clock::now();
+    double bucket_time = duration_cast<milliseconds>(bucket_end_time - bucket_start_time).count() / 1000.0;
+    LOG_DEBUG("长度排序完成: 索引数=" + std::to_string(base_indices.size()) + ", 耗时=" + std::to_string(bucket_time) + "s");
 
     // 2. 按 bucket 切分，再在 bucket 内部打乱
     std::vector<size_t> indices;
@@ -354,12 +359,44 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
     std::random_device rd;
     std::mt19937 g(rd());
 
+    size_t bucket_count = 0;
+    size_t total_buckets = (base_indices.size() + bucket_size - 1) / bucket_size;
+    LOG_DEBUG("Bucket 配置: bucket_size=" + std::to_string(bucket_size) + ", 预计bucket数=" + std::to_string(total_buckets));
+
+    // 记录初始显存
+    size_t mem_before_bucket = 0;
+    if (device.is_cuda()) {
+        try {
+            auto stats = GPUProfiler::get_memory_stats(device);
+            mem_before_bucket = stats.allocated_bytes_current;
+            LOG_DEBUG("Bucket 采样前显存: " + std::to_string(mem_before_bucket / 1024 / 1024) + "MB");
+        } catch (...) {
+            LOG_WARN("无法获取初始显存信息");
+        }
+    }
+
     for (size_t idx : base_indices) {
         bucket.push_back(idx);
         if (bucket.size() >= bucket_size) {
             // 打乱 bucket 内部的顺序
             std::shuffle(bucket.begin(), bucket.end(), g);
             indices.insert(indices.end(), bucket.begin(), bucket.end());
+            bucket_count++;
+            
+            // 记录每个 bucket 处理后的显存（每10个bucket记录一次）
+            if (device.is_cuda() && bucket_count % 10 == 0) {
+                try {
+                    auto stats = GPUProfiler::get_memory_stats(device);
+                    size_t mem_current = stats.allocated_bytes_current;
+                    size_t mem_diff = mem_current - mem_before_bucket;
+                    LOG_DEBUG("Bucket " + std::to_string(bucket_count) + "/" + std::to_string(total_buckets) + 
+                             ": 当前显存=" + std::to_string(mem_current / 1024 / 1024) + "MB, " +
+                             "增长=" + std::to_string(mem_diff / 1024 / 1024) + "MB");
+                } catch (...) {
+                    // 忽略错误
+                }
+            }
+            
             bucket.clear();
         }
     }
@@ -367,14 +404,44 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
     if (!bucket.empty()) {
         std::shuffle(bucket.begin(), bucket.end(), g);
         indices.insert(indices.end(), bucket.begin(), bucket.end());
+        bucket_count++;
+    }
+    
+    LOG_DEBUG("Bucket 采样完成: 总bucket数=" + std::to_string(bucket_count) + 
+             ", 总索引数=" + std::to_string(indices.size()));
+    
+    // 记录 bucket 采样后的显存
+    if (device.is_cuda()) {
+        try {
+            auto stats = GPUProfiler::get_memory_stats(device);
+            size_t mem_after_bucket = stats.allocated_bytes_current;
+            size_t mem_diff = mem_after_bucket - mem_before_bucket;
+            LOG_DEBUG("Bucket 采样后显存: " + std::to_string(mem_after_bucket / 1024 / 1024) + "MB, " +
+                     "增长=" + std::to_string(mem_diff / 1024 / 1024) + "MB");
+        } catch (...) {
+            LOG_WARN("无法获取 bucket 采样后显存信息");
+        }
     }
 
     // 按批次处理数据
     size_t num_batches = (indices.size() + batch_size - 1) / batch_size;
+    LOG_DEBUG("开始批次处理: 总批次数=" + std::to_string(num_batches) + ", batch_size=" + std::to_string(batch_size));
     
     // 计时相关
     auto epoch_start = steady_clock::now();
     size_t processed_samples = 0;
+    
+    // 记录批次处理前的显存
+    size_t mem_before_batches = 0;
+    if (device.is_cuda()) {
+        try {
+            auto stats = GPUProfiler::get_memory_stats(device);
+            mem_before_batches = stats.allocated_bytes_current;
+            LOG_DEBUG("批次处理前显存: " + std::to_string(mem_before_batches / 1024 / 1024) + "MB");
+        } catch (...) {
+            LOG_WARN("无法获取批次处理前显存信息");
+        }
+    }
     
     for (size_t i = 0; i < num_batches; ++i) {
         size_t start_idx = i * batch_size;
@@ -415,9 +482,46 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         total_tokens += batch.ntokens;
         processed_samples += batch_indices.size();
         
-        // 显式释放中间张量（帮助释放显存）
+        // ✅ 立即释放所有张量（关键修复：防止显存泄漏）
         // 训练和验证阶段都需要释放，避免张量引用累积
         out = torch::Tensor();
+        batch.src = torch::Tensor();
+        batch.trg = torch::Tensor();
+        batch.trg_y = torch::Tensor();
+        batch.src_mask = torch::Tensor();
+        batch.trg_mask = torch::Tensor();
+        
+        // 记录显存使用（每10个batch记录一次，或每个bucket结束时记录）
+        if (device.is_cuda() && ((i + 1) % 10 == 0 || (i + 1) % bucket_size == 0)) {
+            try {
+                auto stats = GPUProfiler::get_memory_stats(device);
+                size_t mem_current = stats.allocated_bytes_current;
+                size_t mem_reserved = stats.reserved_bytes_current;
+                size_t mem_diff = mem_current - mem_before_batches;
+                
+                // 判断是否在 bucket 边界
+                bool is_bucket_end = ((i + 1) % bucket_size == 0);
+                std::string log_prefix = is_bucket_end ? "[Bucket结束] " : "";
+                
+                LOG_DEBUG(log_prefix + "Batch " + std::to_string(i + 1) + "/" + std::to_string(num_batches) +
+                         ": 已分配=" + std::to_string(mem_current / 1024 / 1024) + "MB, " +
+                         "已保留=" + std::to_string(mem_reserved / 1024 / 1024) + "MB, " +
+                         "增长=" + std::to_string(mem_diff / 1024 / 1024) + "MB");
+                
+                // 如果是 bucket 结束，强制清理 CUDA 缓存
+                if (is_bucket_end) {
+                    // Python: torch.cuda.empty_cache()
+                    // C++: 使用 c10::cuda::CUDACachingAllocator::emptyCache() 清理缓存
+                    c10::cuda::CUDACachingAllocator::emptyCache();
+                    auto stats_after = GPUProfiler::get_memory_stats(device);
+                    size_t mem_after_cache = stats_after.allocated_bytes_current;
+                    LOG_DEBUG("[Bucket结束] 清理缓存后显存: " + std::to_string(mem_after_cache / 1024 / 1024) + "MB, " +
+                             "释放=" + std::to_string((mem_current - mem_after_cache) / 1024 / 1024) + "MB");
+                }
+            } catch (...) {
+                // 忽略错误
+            }
+        }
         
         // 计算速度和剩余时间（使用从 epoch 开始的总时间）
         auto batch_end = steady_clock::now();
@@ -446,7 +550,7 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         
         // 定期清理CUDA缓存（每50个batch清理一次，避免频繁清理影响性能）
         if (device.is_cuda() && (i + 1) % 50 == 0) {
-          //  torch::cuda::empty_cache();
+           // torch::cuda::empty_cache();  // ✅ 启用：强制释放 CUDA 缓存
         }
     }
     
@@ -456,10 +560,28 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         GPUProfiler::check_gpu_utilization(device);
     }
     
-    // epoch结束后清理CUDA缓存
+    // epoch结束后清理CUDA缓存（使用 CUDACachingAllocator::emptyCache 替代 torch::cuda::empty_cache）
     if (device.is_cuda()) {
-       // torch::cuda::empty_cache();
-       // torch::cuda::synchronize();
+        try {
+            auto stats_before = GPUProfiler::get_memory_stats(device);
+            size_t mem_before = stats_before.allocated_bytes_current;
+
+            // Python: torch.cuda.empty_cache()
+            // C++: 使用 c10::cuda::CUDACachingAllocator::emptyCache() 清理缓存
+            c10::cuda::CUDACachingAllocator::emptyCache();
+            torch::cuda::synchronize();  // 确保所有 CUDA 内存释放后同步
+
+            auto stats_after = GPUProfiler::get_memory_stats(device);
+            size_t mem_after = stats_after.allocated_bytes_current;
+
+            LOG_DEBUG("Epoch结束清理缓存: 清理前=" + std::to_string(mem_before / 1024 / 1024) + "MB, " +
+                     "清理后=" + std::to_string(mem_after / 1024 / 1024) + "MB, " +
+                     "释放=" + std::to_string((mem_before - mem_after) / 1024.0 / 1024.0) + "MB");
+        } catch (...) {
+            LOG_WARN("无法获取 epoch 结束时的显存信息");
+            c10::cuda::CUDACachingAllocator::emptyCache();
+            torch::cuda::synchronize();
+        }
     }
     
     float avg_loss = (total_tokens > 0.0f) ? (total_loss / total_tokens) : 0.0f;
@@ -490,6 +612,11 @@ void train(MTDataset& train_dataset,
     LOG_INFO("实验名称: " + config.name);
     LOG_INFO("实验目录: " + exp_folder);
     LOG_INFO("权重目录: " + weights_folder);
+    
+    // 设置日志文件路径（默认写入到实验目录）
+    std::string log_file_path = exp_folder + "/training.log";
+    Logger::set_log_file(log_file_path);
+    LOG_INFO("日志文件: " + log_file_path);
     
     // 保存训练配置文件（YOLOv5 风格）
     save_config_file(config, exp_folder);
@@ -767,7 +894,7 @@ float evaluate(MTDataset& dataset,
         
         // 定期清理CUDA缓存（每10个batch清理一次）
         if (device.is_cuda() && (i + 1) % 10 == 0) {
-            //torch::cuda::empty_cache();
+           // torch::cuda::empty_cache();  // ✅ 启用：强制释放 CUDA 缓存
         }
     }
     
@@ -776,7 +903,7 @@ float evaluate(MTDataset& dataset,
     
     // 评估结束后清理CUDA缓存
     if (device.is_cuda()) {
-      //  torch::cuda::empty_cache();
+       // torch::cuda::empty_cache();  // ✅ 启用：强制释放 CUDA 缓存
     }
     
     return bleu_score;

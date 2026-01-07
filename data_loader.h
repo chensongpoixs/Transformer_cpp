@@ -50,7 +50,8 @@
 #include <memory>
 #include "utils.h"
 #include "tokenizer_wrapper.h"
-
+//#include <torch/csrc/python_headers.h>
+//#include <torch/csrc/DataLoader.h>
 /**
  * Batch类
  * 存储一个训练批次的数据

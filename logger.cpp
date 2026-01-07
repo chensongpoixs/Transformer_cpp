@@ -45,6 +45,13 @@ std::mutex Logger::mutex_;
 Level Logger::current_level_ = Level::Info;
 bool Logger::color_enabled_ = true;
 bool Logger::ansi_enabled_ = false;
+std::ofstream Logger::log_file_;
+std::string Logger::log_file_path_;
+std::queue<Logger::LogMessage> Logger::log_queue_;
+std::condition_variable Logger::cv_;
+bool Logger::worker_started_ = false;
+bool Logger::stop_worker_ = false;
+std::thread Logger::worker_thread_;
 
 // ANSI 颜色代码
 namespace colors {
@@ -135,8 +142,18 @@ static const char* level_to_string(Level level) {
 }
 
 void Logger::init(Level level) {
+    std::lock_guard<std::mutex> lock(mutex_);
     current_level_ = level;
     enable_ansi_on_windows();
+
+    // 启动后台日志线程（只启动一次）
+    if (!worker_started_) {
+        stop_worker_ = false;
+        worker_thread_ = std::thread(worker_thread_func);
+        worker_started_ = true;
+        // 分离线程，随进程一起退出，避免阻塞主线程
+        worker_thread_.detach();
+    }
 }
 
 void Logger::set_level(Level level) {
@@ -148,6 +165,31 @@ void Logger::enable_color(bool enable) {
     if (enable) {
         enable_ansi_on_windows();
     }
+}
+
+void Logger::set_log_file(const std::string& file_path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // 如果已有文件打开，先关闭
+    if (log_file_.is_open()) {
+        log_file_.close();
+    }
+    
+    log_file_path_ = file_path;
+    if (!file_path.empty()) {
+        log_file_.open(file_path, std::ios::app);  // 追加模式
+        if (!log_file_.is_open()) {
+            std::cerr << "警告: 无法打开日志文件: " << file_path << std::endl;
+        }
+    }
+}
+
+void Logger::close_log_file() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (log_file_.is_open()) {
+        log_file_.close();
+    }
+    log_file_path_.clear();
 }
 
 void Logger::debug(const std::string& msg) {
@@ -167,15 +209,51 @@ void Logger::error(const std::string& msg) {
 }
 
 void Logger::log(Level level, const std::string& msg) {
+    // 过滤日志级别
     if (static_cast<int>(level) < static_cast<int>(current_level_)) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    // 将日志消息放入队列，由后台线程异步处理
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        LogMessage log_msg;
+        log_msg.level = level;
+        log_msg.msg = msg;
+        log_msg.time = std::chrono::system_clock::now();
+        log_queue_.push(std::move(log_msg));
+    }
+    //printf("--->push --> one \n");
+    cv_.notify_one();
+}
 
-    // 获取当前时间
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+void Logger::worker_thread_func() {
+    while (true) {
+        LogMessage log_msg;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait(lock, [] {
+                return stop_worker_ || !log_queue_.empty();
+            });
+
+            if (stop_worker_ && log_queue_.empty()) {
+              //  printf("stop worker !!!\n");
+                break;
+            }
+            //printf("mode  worker !!!\n");
+            log_msg = std::move(log_queue_.front());
+            log_queue_.pop();
+        }
+
+        // 在工作线程中真正执行输出
+        process_log_message(log_msg);
+    }
+    //process_log_message(log_msg);
+}
+
+void Logger::process_log_message(const LogMessage& log_msg) {
+    // 获取时间
+    std::time_t now_c = std::chrono::system_clock::to_time_t(log_msg.time);
     std::tm tm_buf{};
 #if defined(_WIN32) || defined(_WIN64)
     localtime_s(&tm_buf, &now_c);
@@ -186,18 +264,36 @@ void Logger::log(Level level, const std::string& msg) {
     char time_buf[32];
     std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
 
-    // 获取颜色代码
-    std::string color_code = get_color_code(level);
+    // 获取颜色代码（控制台使用）
+    std::string color_code = get_color_code(log_msg.level);
     std::string reset_code = get_reset_code();
-    
-    std::ostringstream oss;
-    oss << color_code
-        << "[" << time_buf << "]"
-        << "[" << level_to_string(level) << "] "
-        << reset_code
-        << msg;
 
-    std::cout << oss.str() << std::endl;
+    // 控制台输出（带颜色）
+    {
+        std::ostringstream oss;
+        oss << color_code
+            << "[" << time_buf << "]"
+            << "[" << level_to_string(log_msg.level) << "] "
+            << reset_code
+            << log_msg.msg;
+
+        // 控制台输出本身是线程安全的（不同实现略有差异），这里简单使用 std::cout
+        std::cout << oss.str() << std::endl;
+        //std::cout.write("\n", 1);
+        //std::cout.flush(); 
+    }
+
+    // 文件输出（不带颜色）
+    if (log_file_.is_open()) {
+        std::ostringstream file_oss;
+        file_oss << "[" << time_buf << "]"
+                 << "[" << level_to_string(log_msg.level) << "] "
+                 << log_msg.msg;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        log_file_ << file_oss.str() << std::endl;
+        log_file_.flush();
+    }
 }
 
 } // namespace logging

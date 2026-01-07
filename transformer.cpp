@@ -46,6 +46,7 @@
 #include "transformer.h"
 #include "utils.h"
 #include <torch/nn/init.h>
+#include "embeddings.h"
 
 // Transformer实现
 TransformerImpl::TransformerImpl(

@@ -42,7 +42,43 @@
 
 #include "embeddings.h"
 #include <cmath>
+/*
 
+// 1. 配置嵌入层选项（填写“订购表单”）
+    // 假设：词汇表大小为10000，每个词用128维向量表示。
+    auto options = torch::nn::EmbeddingOptions(10000, 128)
+        .padding_idx(0)        // 索引0作为填充符，其向量不参与训练
+        .max_norm(2.0)         // 限制嵌入向量的最大L2范数为2.0
+        .norm_type(2.0)        // 使用L2范数进行计算（默认值，通常不需更改）
+        .scale_grad_by_freq(true) // 根据词频缩放梯度
+        .sparse(false);        // 不使用稀疏梯度（如需节省内存可设为true）
+
+    // 2. 使用选项创建嵌入层模块
+    torch::nn::Embedding embedding_layer(options);
+
+    // 3. 准备输入数据
+    // 假设一个批次有2个句子，每个句子长度为5。
+    // 输入是词的索引，类型必须是 torch::kLong (int64)
+    torch::Tensor input_indices = torch::tensor({
+        {12, 456, 0, 78, 1001}, // 句子1，其中0是填充符
+        {34, 0, 0, 9012, 5}     // 句子2
+    }, torch::kLong); // 注意：必须是长整型！
+
+    std::cout << "输入索引张量形状: " << input_indices.sizes() << std::endl;
+    // 输出: [2, 5]
+
+    // 4. 前向传播：将索引“查找”为对应的密集向量
+    torch::Tensor output_embeddings = embedding_layer(input_indices);
+
+    std::cout << "输出嵌入张量形状: " << output_embeddings.sizes() << std::endl;
+    // 输出: [2, 5, 128]
+    // 解读：2个句子 * 每个句子5个词 * 每个词128维向量
+
+    // 5. 验证padding_idx的效果
+    // 检查索引0对应的向量是否全为0（因为设置了padding_idx(0)）
+    std::cout << "\n填充索引0对应的嵌入向量（应为全0）:\n";
+    std::cout << output_embeddings[0][2] << std::endl; // 第一个句子的第三个词（索引0）
+*/
 // Embeddings实现
 EmbeddingsImpl::EmbeddingsImpl(int d_model, int vocab_size)
     : embedding(torch::nn::EmbeddingOptions(vocab_size, d_model)),

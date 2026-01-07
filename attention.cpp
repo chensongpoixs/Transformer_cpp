@@ -123,7 +123,7 @@ torch::Tensor MultiHeadedAttentionImpl::forward(
     auto k = W_k->forward(key).view({nbatches, -1, h, d_k}).transpose(1, 2);
     auto v = W_v->forward(value).view({nbatches, -1, h, d_k}).transpose(1, 2);
     // 2) 计算注意力
-    auto result = attention(q, k, v, mask, dropout);
+    std::pair<torch::Tensor, torch::Tensor> result = attention(q, k, v, mask, dropout);
     auto x = result.first;
     attn = result.second;
     

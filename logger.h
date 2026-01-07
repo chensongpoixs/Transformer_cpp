@@ -52,9 +52,13 @@
 #include <string>
 #include <mutex>
 #include <iostream>
+#include <fstream>
 #include <chrono>
 #include <ctime>
 #include <sstream>
+#include <queue>
+#include <condition_variable>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -78,6 +82,10 @@ public:
     
     // 启用/禁用颜色输出
     static void enable_color(bool enable = true);
+    
+    // 设置日志文件路径（如果为空则只输出到控制台）
+    static void set_log_file(const std::string& file_path);
+    static void close_log_file();
 
     static void debug(const std::string& msg);
     static void info(const std::string& msg);
@@ -90,10 +98,31 @@ private:
     static std::string get_color_code(Level level);
     static std::string get_reset_code();
 
+    struct LogMessage {
+        Level level;
+        std::string msg;
+        std::chrono::system_clock::time_point time;
+    };
+
+    // 后台工作线程函数（异步写日志）
+    static void worker_thread_func();
+
+    // 实际执行输出（控制台 + 文件），在工作线程中调用
+    static void process_log_message(const LogMessage& log_msg);
+
     static std::mutex mutex_;
     static Level current_level_;
     static bool color_enabled_;
     static bool ansi_enabled_;
+    static std::ofstream log_file_;
+    static std::string log_file_path_;
+
+    // 异步日志队列
+    static std::queue<LogMessage> log_queue_;
+    static std::condition_variable cv_;
+    static bool worker_started_;
+    static bool stop_worker_;
+    static std::thread worker_thread_;
 };
 
 // 便捷宏

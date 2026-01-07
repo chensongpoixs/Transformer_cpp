@@ -323,7 +323,7 @@ beam_search(Transformer model,
     
     // 清理CUDA缓存
     if (device.is_cuda()) {
-    //    torch::cuda::empty_cache();
+    //    c10::cuda::CUDACachingAllocator::emptyCache();
     }
     
     return {batch_hyp, batch_scores};

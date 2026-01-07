@@ -50,6 +50,7 @@
 #include <chrono>
 #include <map>
 #include <vector>
+#include <c10/cuda/CUDACachingAllocator.h>
 
 /**
  * GPU性能分析工具
@@ -81,6 +82,18 @@ public:
     
     // 获取GPU内存使用情况（返回格式化字符串，用于进度条显示）
     static std::string get_gpu_memory_str(torch::Device device);
+    
+    // 内存统计结构体（兼容 torch::cuda::memory_stats 的返回格式）
+    struct MemoryStats {
+        size_t allocated_bytes_current;  // 当前已分配的字节数
+        size_t reserved_bytes_current;   // 当前已保留的字节数
+        size_t allocated_bytes_peak;    // 峰值已分配的字节数
+        size_t reserved_bytes_peak;     // 峰值已保留的字节数
+    };
+    
+    // 获取GPU内存统计信息（使用 c10::cuda::CUDACachingAllocator::getMemoryStats）
+    // 替代 torch::cuda::memory_stats，提供更底层和准确的内存信息
+    static MemoryStats get_memory_stats(torch::Device device);
 
 private:
     static std::map<std::string, std::chrono::steady_clock::time_point> start_times_;
