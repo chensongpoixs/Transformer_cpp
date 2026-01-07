@@ -129,6 +129,15 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
             if (auto v = next(i)) config.resume = v;
         } else if (arg == "--workers") {
             if (auto v = next(i)) config.workers = std::stoi(v);
+        } else if (arg == "--pin-memory") {
+            if (auto v = next(i)) {
+                std::string val = v;
+                config.pin_memory = (val == "true" || val == "1" || val == "yes");
+            } else {
+                config.pin_memory = true;  // 默认启用
+            }
+        } else if (arg == "--prefetch-factor") {
+            if (auto v = next(i)) config.prefetch_factor = std::stoi(v);
         } else if (arg == "--exist-ok") {
             config.exist_ok = true;
         } else if (arg == "--tokenizer-dir") {
@@ -143,30 +152,6 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
             if (auto v = next(i)) config.tokenizer_eng = v;
         } else if (arg == "--tokenizer-chn") {
             if (auto v = next(i)) config.tokenizer_chn = v;
-        } else if (arg == "--prefetch") {
-            if (auto v = next(i)) {
-                std::string mode = v;
-                if (mode == "none") {
-                    config.prefetch_mode = 0;
-                } else if (mode == "async") {
-                    config.prefetch_mode = 1;
-                } else if (mode == "thread") {
-                    config.prefetch_mode = 2;
-                } else {
-                    try {
-                        int m = std::stoi(mode);
-                        if (m >= 0 && m <= 2) {
-                            config.prefetch_mode = m;
-                        } else {
-                            LOG_WARN("Invalid --prefetch value (must be 0/1/2 or none/async/thread): " + mode +
-                                     ", using default value " + std::to_string(config.prefetch_mode));
-                        }
-                    } catch (...) {
-                        LOG_WARN("Failed to parse --prefetch argument: " + mode +
-                                 ", using default value " + std::to_string(config.prefetch_mode));
-                    }
-                }
-            }
         } else if (arg == "--help" || arg == "-h") {
             show_help = true;
         } else {
@@ -185,9 +170,6 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
         LOG_INFO("  --epochs <int>             Number of epochs (default: " + std::to_string(config.epoch_num) + ")");
         LOG_INFO("  --lr <float>               Learning rate (default: " + std::to_string(config.lr) + ")");
         LOG_INFO("  --workers <int>            Number of data loading workers (default: " + std::to_string(config.workers) + ", 0=single thread)");
-        LOG_INFO("  --prefetch <mode>          Data prefetch mode: none|async|thread (default: " +
-                 std::string(config.prefetch_mode == 0 ? "none" :
-                             config.prefetch_mode == 1 ? "async" : "thread") + ")");
         LOG_INFO("");
         LOG_INFO("Model:");
         LOG_INFO("  --d-model <int>            Model dimension (default: " + std::to_string(config.d_model) + ")");
@@ -288,7 +270,7 @@ int main(int argc, char* argv[]) {
         oss << "Config: batch_size=" << config.batch_size
             << ", epoch_num=" << config.epoch_num
             << ", lr=" << config.lr
-            << ", prefetch_mode=" << config.prefetch_mode
+            << ", workers=" << config.workers
             << ", train_data_path=" << config.train_data_path
             << ", dev_data_path=" << config.dev_data_path;
         LOG_INFO(oss.str());

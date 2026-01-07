@@ -48,6 +48,7 @@
 
 #include "train.h"
 #include "beam_search.h"
+#include "multi_process_loader.h"
 #include "bleu.h"
 #include "tokenizer_wrapper.h"
 #include "logger.h"
@@ -328,7 +329,7 @@ static void print_progress_bar(int epoch, int total_epochs,
     }
 }
 
-// 辅助函数：根据当前 batch 索引获取一个 Batch（支持同步和预取模式）
+// 辅助函数：根据当前 batch 索引获取一个 Batch（单线程模式）
 static Batch get_batch_for_index(size_t i,
                                  int batch_size,
                                  const std::vector<size_t>& indices,
@@ -336,51 +337,28 @@ static Batch get_batch_for_index(size_t i,
                                  torch::Device device,
                                  const TransformerConfig& config,
                                  std::unique_ptr<CudaStreamManager>& stream_manager,
-                                 std::future<Batch>& next_batch_future,
-                                 bool& has_prefetch,
-                                 std::thread& prefetch_thread,
-                                 bool& prefetch_thread_running,
                                  double& collate_time_ms) {
-    // 不使用预取，或这是第一个 batch：同步构建 batch
-    if (config.prefetch_mode == 0 || !has_prefetch || i == 0) {
-        size_t start_idx = i * batch_size;
-        size_t end_idx = std::min(start_idx + batch_size, indices.size());
-        std::vector<size_t> batch_indices(indices.begin() + start_idx,
-                                         indices.begin() + end_idx);
-        
-        auto collate_start = steady_clock::now();
-        GPUProfiler::start_timer("collate_fn");
-        
-        if (device.is_cuda() && stream_manager && i > 0) {
-            // 在传输 Stream 上准备当前 batch 的数据
-            stream_manager->set_current_stream(0);
-        }
-        
-        Batch b = dataset.collate_fn(batch_indices, device,
-                                     config.padding_idx, config.bos_idx, config.eos_idx,
-                                     config.src_vocab_size, config.tgt_vocab_size);
-        
-        GPUProfiler::end_timer("collate_fn");
-        auto collate_end = steady_clock::now();
-        collate_time_ms = duration_cast<microseconds>(collate_end - collate_start).count() / 1000.0;
-        return b;
-    } else {
-        // 使用预取结果
-        auto collate_start = steady_clock::now();
-        GPUProfiler::start_timer("collate_fn");
-        
-        Batch b = next_batch_future.get();
-        has_prefetch = false;
-        if (prefetch_thread_running) {
-            prefetch_thread.join();
-            prefetch_thread_running = false;
-        }
-        
-        GPUProfiler::end_timer("collate_fn");
-        auto collate_end = steady_clock::now();
-        collate_time_ms = duration_cast<microseconds>(collate_end - collate_start).count() / 1000.0;
-        return b;
+    size_t start_idx = i * batch_size;
+    size_t end_idx = std::min(start_idx + batch_size, indices.size());
+    std::vector<size_t> batch_indices(indices.begin() + start_idx,
+                                     indices.begin() + end_idx);
+    
+    auto collate_start = steady_clock::now();
+    GPUProfiler::start_timer("collate_fn");
+    
+    if (device.is_cuda() && stream_manager && i > 0) {
+        // 在传输 Stream 上准备当前 batch 的数据
+        stream_manager->set_current_stream(0);
     }
+    
+    Batch b = dataset.collate_fn(batch_indices, device,
+                                 config.padding_idx, config.bos_idx, config.eos_idx,
+                                 config.src_vocab_size, config.tgt_vocab_size);
+    
+    GPUProfiler::end_timer("collate_fn");
+    auto collate_end = steady_clock::now();
+    collate_time_ms = duration_cast<microseconds>(collate_end - collate_start).count() / 1000.0;
+    return b;
 }
 
 // 返回 (平均损失, 总tokens数, 批次数量)
@@ -507,60 +485,40 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         }
     }
     
-    // 数据预取相关
-    std::future<Batch> next_batch_future;
-    bool has_prefetch = false;
-    std::thread prefetch_thread;
-    bool prefetch_thread_running = false;
+    // ✅ 使用多进程数据加载器（如果 workers > 0）
+    std::unique_ptr<MultiProcessDataLoader> multi_loader;
+    bool use_multi_loader = (config.workers > 0);
     
-    auto launch_prefetch_async = [&](size_t next_batch_idx) {
-        return std::async(std::launch::async, [&dataset, &indices, batch_size, device, &config, next_batch_idx]() {
-            size_t start_idx = next_batch_idx * batch_size;
-            size_t end_idx = std::min(start_idx + batch_size, indices.size());
-            std::vector<size_t> batch_indices(indices.begin() + start_idx,
-                                              indices.begin() + end_idx);
-            return dataset.collate_fn(batch_indices, device,
-                                      config.padding_idx, config.bos_idx, config.eos_idx,
-                                      config.src_vocab_size, config.tgt_vocab_size);
-        });
-    };
-    
-    auto launch_prefetch_thread = [&](size_t next_batch_idx) {
-        std::promise<Batch> p;
-        next_batch_future = p.get_future();
-        prefetch_thread = std::thread([p = std::move(p), &dataset, &indices, batch_size, device, &config, next_batch_idx]() mutable {
-            size_t start_idx = next_batch_idx * batch_size;
-            size_t end_idx = std::min(start_idx + batch_size, indices.size());
-            std::vector<size_t> batch_indices(indices.begin() + start_idx,
-                                              indices.begin() + end_idx);
-            Batch b = dataset.collate_fn(batch_indices, device,
-                                         config.padding_idx, config.bos_idx, config.eos_idx,
-                                         config.src_vocab_size, config.tgt_vocab_size);
-            p.set_value(std::move(b));
-        });
-        prefetch_thread_running = true;
-    };
+    if (use_multi_loader) {
+        // 创建多进程数据加载器
+        multi_loader = std::make_unique<MultiProcessDataLoader>(
+            dataset, indices, batch_size, device, config,
+            config.workers, config.pin_memory, config.prefetch_factor
+        );
+        LOG_INFO("Using multi-process data loader: workers=" + std::to_string(config.workers) +
+                 ", pin_memory=" + std::string(config.pin_memory ? "true" : "false"));
+    }
     
     for (size_t i = 0; i < num_batches; ++i) {
         double collate_time_ms = 0.0;
         
-        // 使用独立函数获取当前 batch（支持同步和预取模式）
-        Batch batch = get_batch_for_index(i, batch_size, indices, dataset, device,
-                                          config, stream_manager,
-                                          next_batch_future, has_prefetch,
-                                          prefetch_thread, prefetch_thread_running,
-                                          collate_time_ms);
-        
-        // 启动下一个 batch 的预取（如果需要）
-        if (config.prefetch_mode != 0 && i + 1 < num_batches) {
-            size_t next_batch_idx = i + 1;
-            if (config.prefetch_mode == 1) {
-                next_batch_future = launch_prefetch_async(next_batch_idx);
-                has_prefetch = true;
-            } else if (config.prefetch_mode == 2) {
-                launch_prefetch_thread(next_batch_idx);
-                has_prefetch = true;
+        // 使用多进程加载器或单线程加载
+        Batch batch;
+        if (use_multi_loader && multi_loader) {
+            auto collate_start = steady_clock::now();
+            batch = multi_loader->next();
+            auto collate_end = steady_clock::now();
+            collate_time_ms = duration_cast<microseconds>(collate_end - collate_start).count() / 1000.0;
+            
+            // 检查是否加载完成
+            if (!batch.src.defined()) {
+                LOG_DEBUG("Data loader finished at batch " + std::to_string(i));
+                break;
             }
+        } else {
+            // 单线程模式：使用原有逻辑
+            batch = get_batch_for_index(i, batch_size, indices, dataset, device,
+                                        config, stream_manager, collate_time_ms);
         }
         
         // ✅ 流水线并行：确保数据传输完成（只在第一个 batch 或需要时同步）
@@ -688,14 +646,6 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         }
     }
     
-    // 确保预取线程在函数结束前被正确回收
-    if (prefetch_thread_running) {
-        try {
-            prefetch_thread.join();
-        } catch (...) {
-            LOG_WARN("Failed to join prefetch thread (ignored)");
-        }
-    }
     
     // 性能分析：在第一个epoch结束后打印
     if (epoch == 1 && is_training) {

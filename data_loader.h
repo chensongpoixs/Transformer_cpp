@@ -66,6 +66,10 @@ struct Batch {
     torch::Tensor trg_mask;             // 目标语言mask
     int64_t ntokens;                    // 有效token数量
     
+    // 默认构造函数（允许声明未初始化的 Batch 对象）
+    Batch() = default;
+    
+    // 带参数的构造函数
     Batch(const std::vector<std::string>& src_text,
           const std::vector<std::string>& trg_text,
           torch::Tensor src,

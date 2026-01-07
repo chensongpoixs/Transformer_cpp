@@ -281,12 +281,17 @@ Batch MTDataset::collate_fn(const std::vector<size_t>& indices,
     // 这样可以减少 CPU->GPU 同步传输次数，提高 GPU 利用率
     
     // 在 CPU 上创建 tensor 并填充（快速，无同步）
+    // 如果设备是 GPU，使用 pin_memory 加速传输
+    auto tensor_options = torch::TensorOptions().dtype(torch::kLong);
+    if (device.is_cuda()) {
+        // 使用固定内存（pin_memory），加速 CPU->GPU 传输（提升 3-4x）
+        tensor_options = tensor_options.pinned_memory(true);
+    }
+    
     auto src_cpu = torch::full({static_cast<int64_t>(indices.size()), max_src_len}, 
-                               pad_idx,
-                               torch::TensorOptions().dtype(torch::kLong));
+                               pad_idx, tensor_options);
     auto trg_cpu = torch::full({static_cast<int64_t>(indices.size()), max_tgt_len},
-                               pad_idx,
-                               torch::TensorOptions().dtype(torch::kLong));
+                               pad_idx, tensor_options);
     
     // 在 CPU 上填充数据（快速，无 GPU 同步）
     for (size_t i = 0; i < src_tokens_list.size(); ++i) {

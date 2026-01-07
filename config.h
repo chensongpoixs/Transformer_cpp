@@ -95,15 +95,13 @@ struct TransformerConfig {
     std::string weights = "";           // 预训练权重路径（类似 YOLOv5 的 --weights）
     std::string resume = "";            // 恢复训练的检查点路径（类似 YOLOv5 的 --resume）
     int workers = 0;                    // 数据加载线程数（类似 YOLOv5 的 --workers，0=单线程）
+    bool pin_memory = true;             // 是否使用固定内存（pin_memory），加速 CPU->GPU 传输
+    int prefetch_factor = 2;             // 每个 worker 预取的 batch 数量
     bool exist_ok = false;              // 如果实验目录已存在是否覆盖（类似 YOLOv5 的 --exist-ok）
     
     // 设备配置
     bool use_cuda = true;           // 是否使用CUDA
     int device_id = 0;              // GPU设备ID（或 "cpu"）
-
-    // 数据预取配置
-    // 0 = 不预取；1 = 使用 std::async 预取下一个 batch；2 = 使用 std::thread 预取下一个 batch
-    int prefetch_mode = 1;
 };
 
 #endif // TRANSFORMER_CONFIG_H
