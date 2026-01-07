@@ -92,18 +92,18 @@ static std::pair<std::string, std::string> create_exp_folder_cpp(
     std::error_code ec;
     fs::create_directories(project_path, ec);
     if (ec) {
-        LOG_WARN("创建项目目录失败: " + project_path.string() + ", 错误: " + ec.message());
+        LOG_WARN("Failed to create project directory: " + project_path.string() + ", error: " + ec.message());
     }
 
     // 首先尝试 project/name
     fs::path exp_dir = project_path / name;
     if (!fs::exists(exp_dir) || exist_ok) {
         if (exist_ok && fs::exists(exp_dir)) {
-            LOG_INFO("实验目录已存在，使用现有目录: " + exp_dir.string());
+            LOG_INFO("Experiment directory already exists, use existing directory: " + exp_dir.string());
         }
         fs::create_directories(exp_dir / "weights", ec);
         if (ec) {
-            LOG_WARN("创建权重目录失败: " + (exp_dir / "weights").string() + ", 错误: " + ec.message());
+            LOG_WARN("Failed to create weights directory: " + (exp_dir / "weights").string() + ", error: " + ec.message());
         }
         return {exp_dir.string(), (exp_dir / "weights").string()};
     }
@@ -115,7 +115,7 @@ static std::pair<std::string, std::string> create_exp_folder_cpp(
         if (!fs::exists(exp_dir_i)) {
             fs::create_directories(exp_dir_i / "weights", ec);
             if (ec) {
-                LOG_WARN("创建权重目录失败: " + (exp_dir_i / "weights").string() + ", 错误: " + ec.message());
+                LOG_WARN("Failed to create weights directory: " + (exp_dir_i / "weights").string() + ", error: " + ec.message());
             }
             return {exp_dir_i.string(), (exp_dir_i / "weights").string()};
         }
@@ -133,7 +133,7 @@ static void save_config_file(const TransformerConfig& config, const std::string&
     std::string config_path = exp_folder + "/config.yaml";
     std::ofstream config_file(config_path);
     if (!config_file.is_open()) {
-        LOG_WARN("无法保存训练配置: " + config_path);
+        LOG_WARN("Failed to save training config file: " + config_path);
         return;
     }
     
@@ -203,7 +203,7 @@ static void save_config_file(const TransformerConfig& config, const std::string&
     config_file << "device_id: " << config.device_id << "  # GPU设备ID\n";
     
     config_file.close();
-    LOG_INFO("保存训练配置: " + config_path);
+    LOG_INFO("Training config saved to: " + config_path);
 }
 
 
@@ -405,12 +405,12 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
     
     // 基于句子长度的 bucket 采样策略
     // 1. 先按长度排序得到索引
-    LOG_DEBUG("开始 bucket 采样: 数据集大小=" + std::to_string(dataset.size()));
+    LOG_DEBUG("Start bucket sampling: dataset size = " + std::to_string(dataset.size()));
     auto bucket_start_time = steady_clock::now();
     std::vector<size_t> base_indices = dataset.make_length_sorted_indices();
     auto bucket_end_time = steady_clock::now();
     double bucket_time = duration_cast<milliseconds>(bucket_end_time - bucket_start_time).count() / 1000.0;
-    LOG_DEBUG("长度排序完成: 索引数=" + std::to_string(base_indices.size()) + ", 耗时=" + std::to_string(bucket_time) + "s");
+    LOG_DEBUG("Length sorting finished: num_indices=" + std::to_string(base_indices.size()) + ", time=" + std::to_string(bucket_time) + "s");
 
     // 2. 按 bucket 切分，再在 bucket 内部打乱
     std::vector<size_t> indices;
@@ -425,7 +425,7 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
 
     size_t bucket_count = 0;
     size_t total_buckets = (base_indices.size() + bucket_size - 1) / bucket_size;
-    LOG_DEBUG("Bucket 配置: bucket_size=" + std::to_string(bucket_size) + ", 预计bucket数=" + std::to_string(total_buckets));
+    LOG_DEBUG("Bucket config: bucket_size=" + std::to_string(bucket_size) + ", estimated_num_buckets=" + std::to_string(total_buckets));
 
     // 记录初始显存
     size_t mem_before_bucket = 0;
@@ -433,9 +433,9 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         try {
             auto stats = GPUProfiler::get_memory_stats(device);
             mem_before_bucket = stats.allocated_bytes_current;
-            LOG_DEBUG("Bucket 采样前显存: " + std::to_string(mem_before_bucket / 1024 / 1024) + "MB");
+            LOG_DEBUG("Memory before bucket sampling: " + std::to_string(mem_before_bucket / 1024 / 1024) + "MB");
         } catch (...) {
-            LOG_WARN("无法获取初始显存信息");
+            LOG_WARN("Failed to get initial GPU memory info");
         }
     }
 
@@ -454,10 +454,10 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
                     size_t mem_current = stats.allocated_bytes_current;
                     size_t mem_diff = mem_current - mem_before_bucket;
                     LOG_DEBUG("Bucket " + std::to_string(bucket_count) + "/" + std::to_string(total_buckets) + 
-                             ": 当前显存=" + std::to_string(mem_current / 1024 / 1024) + "MB, " +
-                             "增长=" + std::to_string(mem_diff / 1024 / 1024) + "MB");
+                             ": allocated=" + std::to_string(mem_current / 1024 / 1024) + "MB, " +
+                             "increase=" + std::to_string(mem_diff / 1024 / 1024) + "MB");
                 } catch (...) {
-                    LOG_WARN("获取 bucket 显存统计信息时发生异常（已忽略）");
+                    LOG_WARN("Exception occurred while getting bucket memory stats (ignored)");
                 }
             }
             
@@ -471,8 +471,8 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         bucket_count++;
     }
     
-    LOG_DEBUG("Bucket 采样完成: 总bucket数=" + std::to_string(bucket_count) + 
-             ", 总索引数=" + std::to_string(indices.size()));
+    LOG_DEBUG("Bucket sampling finished: num_buckets=" + std::to_string(bucket_count) + 
+             ", num_indices=" + std::to_string(indices.size()));
     
     // 记录 bucket 采样后的显存
     if (device.is_cuda()) {
@@ -480,16 +480,16 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
             auto stats = GPUProfiler::get_memory_stats(device);
             size_t mem_after_bucket = stats.allocated_bytes_current;
             size_t mem_diff = mem_after_bucket - mem_before_bucket;
-            LOG_DEBUG("Bucket 采样后显存: " + std::to_string(mem_after_bucket / 1024 / 1024) + "MB, " +
-                     "增长=" + std::to_string(mem_diff / 1024 / 1024) + "MB");
+            LOG_DEBUG("Memory after bucket sampling: " + std::to_string(mem_after_bucket / 1024 / 1024) + "MB, " +
+                     "increase=" + std::to_string(mem_diff / 1024 / 1024) + "MB");
         } catch (...) {
-            LOG_WARN("无法获取 bucket 采样后显存信息");
+            LOG_WARN("Failed to get memory stats after bucket sampling");
         }
     }
-
+    
     // 按批次处理数据
     size_t num_batches = (indices.size() + batch_size - 1) / batch_size;
-    LOG_DEBUG("开始批次处理: 总批次数=" + std::to_string(num_batches) + ", batch_size=" + std::to_string(batch_size));
+    LOG_DEBUG("Start batch processing: num_batches=" + std::to_string(num_batches) + ", batch_size=" + std::to_string(batch_size));
     
     // 计时相关
     auto epoch_start = steady_clock::now();
@@ -501,9 +501,9 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         try {
             auto stats = GPUProfiler::get_memory_stats(device);
             mem_before_batches = stats.allocated_bytes_current;
-            LOG_DEBUG("批次处理前显存: " + std::to_string(mem_before_batches / 1024 / 1024) + "MB");
+            LOG_DEBUG("Memory before batch processing: " + std::to_string(mem_before_batches / 1024 / 1024) + "MB");
         } catch (...) {
-            LOG_WARN("无法获取批次处理前显存信息");
+            LOG_WARN("Failed to get memory stats before batch processing");
         }
     }
     
@@ -632,12 +632,12 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
                 
                 // 判断是否在 bucket 边界
                 bool is_bucket_end = ((i + 1) % bucket_size == 0);
-                std::string log_prefix = is_bucket_end ? "[Bucket结束] " : "";
+                std::string log_prefix = is_bucket_end ? "[Bucket end] " : "";
                 
                 LOG_DEBUG(log_prefix + "Batch " + std::to_string(i + 1) + "/" + std::to_string(num_batches) +
-                         ": 已分配=" + std::to_string(mem_current / 1024 / 1024) + "MB, " +
-                         "已保留=" + std::to_string(mem_reserved / 1024 / 1024) + "MB, " +
-                         "增长=" + std::to_string(mem_diff / 1024 / 1024) + "MB");
+                         ": allocated=" + std::to_string(mem_current / 1024 / 1024) + "MB, " +
+                         "reserved=" + std::to_string(mem_reserved / 1024 / 1024) + "MB, " +
+                         "increase=" + std::to_string(mem_diff / 1024 / 1024) + "MB");
                 
                 // 如果是 bucket 结束，强制清理 CUDA 缓存
                 if (is_bucket_end) {
@@ -646,15 +646,15 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
                     c10::cuda::CUDACachingAllocator::emptyCache();
                     auto stats_after = GPUProfiler::get_memory_stats(device);
                     size_t mem_after_cache = stats_after.allocated_bytes_current;
-                    LOG_DEBUG("[Bucket结束] 清理缓存后显存: " + std::to_string(mem_after_cache / 1024 / 1024) + "MB, " +
-                             "释放=" + std::to_string((mem_current - mem_after_cache) / 1024 / 1024) + "MB");
+                    LOG_DEBUG("[Bucket end] Memory after empty cache: " + std::to_string(mem_after_cache / 1024 / 1024) + "MB, " +
+                             "released=" + std::to_string((mem_current - mem_after_cache) / 1024 / 1024) + "MB");
                 }
             } catch (...) {
-                LOG_WARN("获取批次显存统计或清理缓存时发生异常（已忽略）");
+                LOG_WARN("Exception occurred while getting batch memory stats or emptying cache (ignored)");
             }
         }
         
-        // 计算速度和剩余时间（使用从 epoch 开始的总时间）
+    // 计算速度和剩余时间（使用从 epoch 开始的总时间）
         auto batch_end = steady_clock::now();
         double elapsed_time = duration_cast<milliseconds>(batch_end - epoch_start).count() / 1000.0;
         double speed = (elapsed_time > 0.0) ? (processed_samples / elapsed_time) : 0.0;
@@ -693,7 +693,7 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         try {
             prefetch_thread.join();
         } catch (...) {
-            LOG_WARN("预取线程 join 失败（已忽略）");
+            LOG_WARN("Failed to join prefetch thread (ignored)");
         }
     }
     
@@ -703,22 +703,22 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         GPUProfiler::check_gpu_utilization(device);
         
         // ✅ 新增：打印 GPU 利用率诊断和建议
-        LOG_INFO("========== GPU 利用率诊断 ==========");
-        LOG_INFO("提示: 如果 GPU 利用率 < 50%，可能原因：");
-        LOG_INFO("  1. 数据加载是瓶颈（CPU 处理慢，GPU 等待）");
-        LOG_INFO("     - 解决方案：已优化为批量非阻塞传输");
-        LOG_INFO("     - 建议：增加 --workers 参数使用多线程加载");
-        LOG_INFO("  2. Batch size 太小，无法充分利用 GPU");
-        LOG_INFO("     - 解决方案：增加 --batch-size 参数（如 64、128）");
-        LOG_INFO("     - 当前 batch_size=" + std::to_string(config.batch_size));
-        LOG_INFO("  3. 同步操作过多");
-        LOG_INFO("     - 解决方案：已减少显存统计频率（每50个batch）");
-        LOG_INFO("     - 解决方案：已优化进度条更新频率（每10个batch）");
-        LOG_INFO("  4. 模型太小，计算量不足");
-        LOG_INFO("     - 解决方案：增加模型大小（--d-model, --n-layers）");
-        LOG_INFO("     - 当前 d_model=" + std::to_string(config.d_model) + 
+        LOG_INFO("========== GPU Utilization Diagnosis ==========");
+        LOG_INFO("Note: If GPU utilization < 50%, possible reasons:");
+        LOG_INFO("  1. Data loading is the bottleneck (CPU too slow, GPU waiting)");
+        LOG_INFO("     - Fix: already optimized to batched non-blocking transfer");
+        LOG_INFO("     - Suggest: increase --workers to use multi-threaded loading");
+        LOG_INFO("  2. Batch size is too small to fully utilize GPU");
+        LOG_INFO("     - Fix: increase --batch-size (e.g., 64, 128)");
+        LOG_INFO("     - Current batch_size=" + std::to_string(config.batch_size));
+        LOG_INFO("  3. Too many synchronization operations");
+        LOG_INFO("     - Fix: memory stats frequency reduced (every 50 batches)");
+        LOG_INFO("     - Fix: progress updates reduced (every 10 batches)");
+        LOG_INFO("  4. Model is too small, computation not heavy enough");
+        LOG_INFO("     - Fix: increase model size (--d-model, --n-layers)");
+        LOG_INFO("     - Current d_model=" + std::to_string(config.d_model) + 
                  ", n_layers=" + std::to_string(config.n_layers));
-        LOG_INFO("====================================");
+        LOG_INFO("===============================================");
     }
     
     // epoch结束后清理CUDA缓存（使用 CUDACachingAllocator::emptyCache 替代 torch::cuda::empty_cache）
@@ -726,7 +726,7 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         try {
             auto stats_before = GPUProfiler::get_memory_stats(device);
             size_t mem_before = stats_before.allocated_bytes_current;
-
+            
             // Python: torch.cuda.empty_cache()
             // C++: 使用 c10::cuda::CUDACachingAllocator::emptyCache() 清理缓存
             c10::cuda::CUDACachingAllocator::emptyCache();
@@ -734,12 +734,12 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
 
             auto stats_after = GPUProfiler::get_memory_stats(device);
             size_t mem_after = stats_after.allocated_bytes_current;
-
-            LOG_DEBUG("Epoch结束清理缓存: 清理前=" + std::to_string(mem_before / 1024 / 1024) + "MB, " +
-                     "清理后=" + std::to_string(mem_after / 1024 / 1024) + "MB, " +
-                     "释放=" + std::to_string((mem_before - mem_after) / 1024.0 / 1024.0) + "MB");
+            
+            LOG_DEBUG("Clear cache at epoch end: before=" + std::to_string(mem_before / 1024 / 1024) + "MB, " +
+                     "after=" + std::to_string(mem_after / 1024 / 1024) + "MB, " +
+                     "released=" + std::to_string((mem_before - mem_after) / 1024.0 / 1024.0) + "MB");
         } catch (...) {
-            LOG_WARN("无法获取 epoch 结束时的显存信息");
+            LOG_WARN("Failed to get memory stats at epoch end");
             c10::cuda::CUDACachingAllocator::emptyCache();
             torch::cuda::synchronize();
         }
@@ -769,15 +769,15 @@ void train(MTDataset& train_dataset,
     // 创建实验文件夹（对齐 Python 版 create_exp_folder，支持 YOLOv5 风格）
     auto [exp_folder, weights_folder] = create_exp_folder_cpp(
         config.project, config.name, config.exist_ok);
-    LOG_INFO("项目目录: " + config.project);
-    LOG_INFO("实验名称: " + config.name);
-    LOG_INFO("实验目录: " + exp_folder);
-    LOG_INFO("权重目录: " + weights_folder);
+    LOG_INFO("Project dir: " + config.project);
+    LOG_INFO("Experiment name: " + config.name);
+    LOG_INFO("Experiment dir: " + exp_folder);
+    LOG_INFO("Weights dir: " + weights_folder);
     
     // 设置日志文件路径（默认写入到实验目录）
     std::string log_file_path = exp_folder + "/training.log";
     Logger::set_log_file(log_file_path);
-    LOG_INFO("日志文件: " + log_file_path);
+    LOG_INFO("Log file: " + log_file_path);
     
     // 保存训练配置文件（YOLOv5 风格）
     save_config_file(config, exp_folder);
@@ -790,14 +790,14 @@ void train(MTDataset& train_dataset,
     // 创建损失计算器
     auto loss_compute_train = LossCompute(model->get_generator(), criterion, optimizer);
     auto loss_compute_eval = LossCompute(model->get_generator(), criterion, nullptr);
-    LOG_INFO("LossCompute 对象创建完成（train & eval）");
+    LOG_INFO("LossCompute objects created (train & eval)");
     
     // 计算训练数据集的bucket采样信息（在训练开始前打印）
     const size_t bucket_size = static_cast<size_t>(config.batch_size) * 4;  // 可调：4 倍batch
     size_t train_dataset_size = train_dataset.size();
     size_t train_num_batches = (train_dataset_size + config.batch_size - 1) / config.batch_size;
-    LOG_INFO("使用长度bucket采样: bucket_size=" + std::to_string(bucket_size) +
-             ", 总样本数=" + std::to_string(train_dataset_size) + ", 批次数=" + std::to_string(train_num_batches));
+    LOG_INFO("Using length-based bucket sampling: bucket_size=" + std::to_string(bucket_size) +
+             ", num_samples=" + std::to_string(train_dataset_size) + ", num_batches=" + std::to_string(train_num_batches));
     
     // YOLOv5风格：在训练开始前打印表头
     std::cout << std::endl;

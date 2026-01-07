@@ -93,12 +93,12 @@ Batch::Batch(const std::vector<std::string>& src_text,
 
 // MTDataset实现
 void MTDataset::load_data(const std::string& data_path) {
-    LOG_INFO("开始加载数据集(JSON): " + data_path);
+    LOG_INFO("Start loading dataset (JSON): " + data_path);
 
     std::ifstream file(data_path);
     if (!file.is_open()) {
-        LOG_ERROR("无法打开数据文件: " + data_path);
-        throw std::runtime_error("无法打开数据文件: " + data_path);
+        LOG_ERROR("Failed to open data file: " + data_path);
+        throw std::runtime_error("Failed to open data file: " + data_path);
     }
     
     en_sentences.clear();
@@ -110,8 +110,8 @@ void MTDataset::load_data(const std::string& data_path) {
         file.close();
 
         if (!data.is_array()) {
-            LOG_ERROR("JSON 格式错误: 根节点不是数组: " + data_path);
-            throw std::runtime_error("JSON 格式错误: 根节点不是数组: " + data_path);
+            LOG_ERROR("Invalid JSON format: root is not an array: " + data_path);
+            throw std::runtime_error("Invalid JSON format: root is not an array: " + data_path);
         }
 
         size_t entry_count = data.size();
@@ -131,12 +131,12 @@ void MTDataset::load_data(const std::string& data_path) {
         }
 
         std::ostringstream oss;
-        oss << "数据文件加载完成(JSON): " << data_path
-            << ", JSON条目数=" << entry_count
-            << ", 有效样本数=" << en_sentences.size();
+        oss << "Dataset loaded (JSON): " << data_path
+            << ", json_entries=" << entry_count
+            << ", valid_samples=" << en_sentences.size();
         LOG_INFO(oss.str());
     } catch (const std::exception& e) {
-        LOG_ERROR(std::string("解析JSON失败: ") + data_path + ", 错误: " + e.what());
+        LOG_ERROR(std::string("Failed to parse JSON: ") + data_path + ", error: " + e.what());
         throw;
     }
     
@@ -152,7 +152,7 @@ void MTDataset::load_data(const std::string& data_path) {
 
     {
         std::ostringstream oss;
-        oss << "数据集排序完成, 总样本数=" << en_sentences.size();
+        oss << "Dataset sorted by length, num_samples=" << en_sentences.size();
         LOG_INFO(oss.str());
     }
 }
@@ -173,7 +173,7 @@ std::vector<size_t> MTDataset::make_length_sorted_indices() const {
 }
 
 MTDataset::MTDataset(const std::string& data_path) {
-    LOG_INFO("创建MTDataset, 数据路径: " + data_path);
+    LOG_INFO("Create MTDataset, data path: " + data_path);
 
     load_data(data_path);
     // 默认加载分词器
@@ -185,7 +185,7 @@ MTDataset::MTDataset(const std::string& data_path) {
 
     {
         std::ostringstream oss;
-        oss << "MTDataset 初始化完成: 样本数=" << en_sentences.size();
+        oss << "MTDataset initialized: num_samples=" << en_sentences.size();
         LOG_INFO(oss.str());
     }
 }

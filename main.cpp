@@ -78,7 +78,7 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
         std::string arg = argv[i];
         auto next = [&](int& idx) -> const char* {
             if (idx + 1 >= argc) {
-                LOG_WARN("命令行参数缺少值: " + arg);
+                LOG_WARN("Missing value for command line argument: " + arg);
                 return nullptr;
             }
             return argv[++idx];
@@ -115,7 +115,7 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
                         config.device_id = std::stoi(device_str);
                         config.use_cuda = true;
                     } catch (...) {
-                        LOG_WARN("无效的设备ID: " + device_str + "，使用默认值");
+                        LOG_WARN("Invalid device id: " + device_str + ", using default value");
                     }
                 }
             }
@@ -158,62 +158,62 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
                         if (m >= 0 && m <= 2) {
                             config.prefetch_mode = m;
                         } else {
-                            LOG_WARN("无效的 --prefetch 值(需为 0/1/2 或 none/async/thread): " + mode +
-                                     "，使用默认值 " + std::to_string(config.prefetch_mode));
+                            LOG_WARN("Invalid --prefetch value (must be 0/1/2 or none/async/thread): " + mode +
+                                     ", using default value " + std::to_string(config.prefetch_mode));
                         }
                     } catch (...) {
-                        LOG_WARN("无法解析 --prefetch 参数: " + mode +
-                                 "，使用默认值 " + std::to_string(config.prefetch_mode));
+                        LOG_WARN("Failed to parse --prefetch argument: " + mode +
+                                 ", using default value " + std::to_string(config.prefetch_mode));
                     }
                 }
             }
         } else if (arg == "--help" || arg == "-h") {
             show_help = true;
         } else {
-            LOG_WARN("未知命令行参数: " + arg);
+            LOG_WARN("Unknown command line argument: " + arg);
         }
     }
 
     if (show_help) {
-        LOG_INFO("Transformer C++ 训练程序 - YOLOv5 风格命令行参数");
+        LOG_INFO("Transformer C++ training program - YOLOv5 style command line arguments");
         LOG_INFO("");
-        LOG_INFO("数据相关:");
-        LOG_INFO("  --data <path>              数据目录（包含 train.json/dev.json/test.json）");
+        LOG_INFO("Data:");
+        LOG_INFO("  --data <path>              Dataset directory (containing train.json/dev.json/test.json)");
         LOG_INFO("");
-        LOG_INFO("训练相关:");
-        LOG_INFO("  --batch-size <int>         批次大小 (默认: " + std::to_string(config.batch_size) + ")");
-        LOG_INFO("  --epochs <int>             训练轮数 (默认: " + std::to_string(config.epoch_num) + ")");
-        LOG_INFO("  --lr <float>               学习率 (默认: " + std::to_string(config.lr) + ")");
-        LOG_INFO("  --workers <int>            数据加载线程数 (默认: " + std::to_string(config.workers) + ", 0=单线程)");
-        LOG_INFO("  --prefetch <mode>          数据预取模式: none|async|thread (默认: " +
+        LOG_INFO("Training:");
+        LOG_INFO("  --batch-size <int>         Batch size (default: " + std::to_string(config.batch_size) + ")");
+        LOG_INFO("  --epochs <int>             Number of epochs (default: " + std::to_string(config.epoch_num) + ")");
+        LOG_INFO("  --lr <float>               Learning rate (default: " + std::to_string(config.lr) + ")");
+        LOG_INFO("  --workers <int>            Number of data loading workers (default: " + std::to_string(config.workers) + ", 0=single thread)");
+        LOG_INFO("  --prefetch <mode>          Data prefetch mode: none|async|thread (default: " +
                  std::string(config.prefetch_mode == 0 ? "none" :
                              config.prefetch_mode == 1 ? "async" : "thread") + ")");
         LOG_INFO("");
-        LOG_INFO("模型相关:");
-        LOG_INFO("  --d-model <int>            模型维度 (默认: " + std::to_string(config.d_model) + ")");
-        LOG_INFO("  --n-layers <int>           Transformer层数 (默认: " + std::to_string(config.n_layers) + ")");
-        LOG_INFO("  --n-heads <int>            多头注意力头数 (默认: " + std::to_string(config.n_heads) + ")");
-        LOG_INFO("  --d-ff <int>               前馈网络隐藏层维度 (默认: " + std::to_string(config.d_ff) + ")");
-        LOG_INFO("  --dropout <float>          Dropout率 (默认: " + std::to_string(config.dropout) + ")");
-        LOG_INFO("  --beam-size <int>          Beam Search大小 (默认: " + std::to_string(config.beam_size) + ")");
+        LOG_INFO("Model:");
+        LOG_INFO("  --d-model <int>            Model dimension (default: " + std::to_string(config.d_model) + ")");
+        LOG_INFO("  --n-layers <int>           Number of Transformer layers (default: " + std::to_string(config.n_layers) + ")");
+        LOG_INFO("  --n-heads <int>            Number of attention heads (default: " + std::to_string(config.n_heads) + ")");
+        LOG_INFO("  --d-ff <int>               Feed-forward hidden dimension (default: " + std::to_string(config.d_ff) + ")");
+        LOG_INFO("  --dropout <float>          Dropout rate (default: " + std::to_string(config.dropout) + ")");
+        LOG_INFO("  --beam-size <int>          Beam search size (default: " + std::to_string(config.beam_size) + ")");
         LOG_INFO("");
-        LOG_INFO("实验相关:");
-        LOG_INFO("  --project <path>           项目目录 (默认: " + config.project + ")");
-        LOG_INFO("  --name <str>               实验名称 (默认: " + config.name + ")");
-        LOG_INFO("  --exist-ok                 如果实验目录已存在则覆盖");
+        LOG_INFO("Experiment:");
+        LOG_INFO("  --project <path>           Project directory (default: " + config.project + ")");
+        LOG_INFO("  --name <str>               Experiment name (default: " + config.name + ")");
+        LOG_INFO("  --exist-ok                 Overwrite existing experiment directory if it exists");
         LOG_INFO("");
-        LOG_INFO("分词器相关:");
-        LOG_INFO("  --tokenizer-dir <path>      分词器目录 (默认: " + config.tokenizer_dir + ")");
-        LOG_INFO("  --tokenizer-eng <path>      英文分词器模型路径 (默认: " + config.tokenizer_eng + ")");
-        LOG_INFO("  --tokenizer-chn <path>      中文分词器模型路径 (默认: " + config.tokenizer_chn + ")");
+        LOG_INFO("Tokenizer:");
+        LOG_INFO("  --tokenizer-dir <path>      Tokenizer directory (default: " + config.tokenizer_dir + ")");
+        LOG_INFO("  --tokenizer-eng <path>      English tokenizer model path (default: " + config.tokenizer_eng + ")");
+        LOG_INFO("  --tokenizer-chn <path>      Chinese tokenizer model path (default: " + config.tokenizer_chn + ")");
         LOG_INFO("");
-        LOG_INFO("其他:");
-        LOG_INFO("  --device <int|cpu>         设备 (默认: " + std::to_string(config.device_id) + ", 或 'cpu')");
-        LOG_INFO("  --weights <path>           预训练权重路径");
-        LOG_INFO("  --resume <path>            恢复训练的检查点路径");
-        LOG_INFO("  --help, -h                 显示此帮助信息");
+        LOG_INFO("Other:");
+        LOG_INFO("  --device <int|cpu>         Device (default: " + std::to_string(config.device_id) + ", or 'cpu')");
+        LOG_INFO("  --weights <path>           Pretrained weights path");
+        LOG_INFO("  --resume <path>            Checkpoint path to resume training");
+        LOG_INFO("  --help, -h                 Show this help message");
         LOG_INFO("");
-        LOG_INFO("示例:");
+        LOG_INFO("Examples:");
         LOG_INFO("  transformer.exe --data D:/data/mt --batch-size 64 --epochs 50");
         LOG_INFO("  transformer.exe --data ./data --project runs/train --name exp1 --exist-ok");
         return false;  // 返回 false 表示应该退出程序
@@ -232,20 +232,20 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
         config.dev_data_path   = dev_p.string();
         config.test_data_path  = test_p.string();
 
-        LOG_INFO("使用命令行指定的数据目录: " + config.data_dir);
+        LOG_INFO("Use data directory from command line: " + config.data_dir);
         LOG_INFO("  train_data_path = " + config.train_data_path);
         LOG_INFO("  dev_data_path   = " + config.dev_data_path);
         LOG_INFO("  test_data_path  = " + config.test_data_path);
     } else {
         // 未指定 data_dir，则沿用 config 默认值
-        LOG_INFO("未通过命令行指定 --data，使用默认路径:");
+        LOG_INFO("No --data specified, use default paths:");
         LOG_INFO("  train_data_path = " + config.train_data_path);
         LOG_INFO("  dev_data_path   = " + config.dev_data_path);
         LOG_INFO("  test_data_path  = " + config.test_data_path);
     }
     
     // 输出分词器路径信息
-    LOG_INFO("分词器路径:");
+    LOG_INFO("Tokenizer paths:");
     LOG_INFO("  tokenizer_eng = " + config.tokenizer_eng);
     LOG_INFO("  tokenizer_chn = " + config.tokenizer_chn);
     
@@ -278,14 +278,14 @@ int main(int argc, char* argv[]) {
     torch::Device device(config.use_cuda && torch::cuda::is_available() 
                          ? torch::kCUDA 
                          : torch::kCPU);
-    LOG_INFO(std::string("使用设备: ") + (device.is_cuda() ? "CUDA" : "CPU"));
+    LOG_INFO(std::string("Using device: ") + (device.is_cuda() ? "CUDA" : "CPU"));
     if (device.is_cuda()) {
-        LOG_INFO("GPU设备ID: " + std::to_string(config.device_id));
+        LOG_INFO("GPU device id: " + std::to_string(config.device_id));
     }
 
     {
         std::ostringstream oss;
-        oss << "配置: batch_size=" << config.batch_size
+        oss << "Config: batch_size=" << config.batch_size
             << ", epoch_num=" << config.epoch_num
             << ", lr=" << config.lr
             << ", prefetch_mode=" << config.prefetch_mode
@@ -296,12 +296,12 @@ int main(int argc, char* argv[]) {
     
     try {
         // 加载数据集
-        LOG_INFO("开始加载数据集...");
+        LOG_INFO("Start loading datasets...");
         MTDataset train_dataset(config.train_data_path);
         MTDataset dev_dataset(config.dev_data_path);
         
         // 使用配置的分词器路径加载分词器
-        LOG_INFO("加载分词器...");
+        LOG_INFO("Load tokenizers...");
         auto eng_tokenizer = english_tokenizer_load(config.tokenizer_eng);
         auto chn_tokenizer = chinese_tokenizer_load(config.tokenizer_chn);
         
@@ -311,13 +311,13 @@ int main(int argc, char* argv[]) {
         
         {
             std::ostringstream oss;
-            oss << "数据集加载完成: 训练集样本数=" << train_dataset.size()
-                << ", 验证集样本数=" << dev_dataset.size();
+            oss << "Datasets loaded: train_size=" << train_dataset.size()
+                << ", dev_size=" << dev_dataset.size();
             LOG_INFO(oss.str());
         }
         
         // 创建模型（直接在GPU上创建，所有buffer和参数都在GPU上）
-        LOG_INFO("开始创建 Transformer 模型...");
+        LOG_INFO("Start creating Transformer model...");
         auto model = make_model(
             config.src_vocab_size,
             config.tgt_vocab_size,
@@ -329,10 +329,10 @@ int main(int argc, char* argv[]) {
             device  // 直接在指定设备上创建模型
         );
         
-        LOG_INFO("模型创建成功!");
+        LOG_INFO("Model created successfully!");
         {
             std::ostringstream oss;
-            oss << "模型参数: "
+            oss << "Model config: "
                 << "d_model=" << config.d_model
                 << ", n_heads=" << config.n_heads
                 << ", n_layers=" << config.n_layers
@@ -347,19 +347,19 @@ int main(int argc, char* argv[]) {
         for (const auto& param : model->parameters()) {
             num_params += param.numel();
         }
-        LOG_INFO("总参数量: " + std::to_string(num_params));
+        LOG_INFO("Total parameters: " + std::to_string(num_params));
         
         // 加载预训练权重（如果指定了 --weights）
         if (!config.weights.empty()) {
             try {
                 if (fs::exists(config.weights)) {
                     torch::load(model, config.weights, device);
-                    LOG_INFO("成功加载预训练权重: " + config.weights);
+                    LOG_INFO("Loaded pretrained weights: " + config.weights);
                 } else {
-                    LOG_WARN("权重文件不存在: " + config.weights);
+                    LOG_WARN("Weights file does not exist: " + config.weights);
                 }
             } catch (const std::exception& e) {
-                LOG_ERROR(std::string("加载权重失败: ") + config.weights + ", 错误: " + e.what());
+                LOG_ERROR(std::string("Failed to load weights: ") + config.weights + ", error: " + e.what());
             }
         }
         
@@ -371,13 +371,13 @@ int main(int argc, char* argv[]) {
                     torch::load(model, config.resume, device);
                     // 注意：这里简化处理，实际应该也加载优化器状态和 epoch 编号
                     // 为了完整实现，需要保存/加载更多状态信息
-                    LOG_INFO("成功恢复训练检查点: " + config.resume);
-                    LOG_WARN("注意：当前实现仅恢复模型权重，未恢复优化器状态和 epoch 编号");
+                    LOG_INFO("Resume from checkpoint: " + config.resume);
+                    LOG_WARN("Note: current implementation only restores model weights, not optimizer state or epoch index");
                 } else {
-                    LOG_WARN("检查点文件不存在: " + config.resume);
+                    LOG_WARN("Checkpoint file does not exist: " + config.resume);
                 }
             } catch (const std::exception& e) {
-                LOG_ERROR(std::string("恢复训练失败: ") + config.resume + ", 错误: " + e.what());
+                LOG_ERROR(std::string("Failed to resume training from checkpoint: ") + config.resume + ", error: " + e.what());
             }
         }
         
@@ -387,17 +387,17 @@ int main(int argc, char* argv[]) {
                 .ignore_index(config.padding_idx)
                 .reduction(torch::kSum)
         );
-        LOG_INFO("CrossEntropyLoss 损失函数创建完成");
+        LOG_INFO("CrossEntropyLoss created");
         
         // 创建优化器
-        LOG_INFO("创建优化器 (NoamOpt + Adam)...");
+        LOG_INFO("Create optimizer (NoamOpt + Adam)...");
         auto optimizer = get_std_opt(model, config.d_model);
-        LOG_INFO("优化器创建成功");
+        LOG_INFO("Optimizer created");
         
         // 开始训练
         {
             std::ostringstream oss;
-            oss << "开始训练: batch_size=" << config.batch_size
+            oss << "Start training: batch_size=" << config.batch_size
                 << ", epoch_num=" << config.epoch_num
                 << ", lr=" << config.lr;
             LOG_INFO(oss.str());
@@ -405,10 +405,10 @@ int main(int argc, char* argv[]) {
         
         train(train_dataset, dev_dataset, model, criterion, optimizer, config, device);
         
-        LOG_INFO("训练完成");
+        LOG_INFO("Training finished");
         
     } catch (const std::exception& e) {
-        LOG_ERROR(std::string("程序异常: ") + e.what());
+        LOG_ERROR(std::string("Unhandled exception: ") + e.what());
         return 1;
     }
     

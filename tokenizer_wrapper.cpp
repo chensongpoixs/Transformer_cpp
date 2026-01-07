@@ -76,8 +76,8 @@ bool SentencePieceTokenizer::load(const std::string& model_path) {
     // SentencePiece的Load方法返回util::Status
     auto status = processor_->Load(model_path);
     if (!status.ok()) {
-        LOG_ERROR(std::string("无法加载SentencePiece模型: ") + model_path +
-                  ", 错误: " + status.ToString());
+        LOG_ERROR(std::string("Failed to load SentencePiece model: ") + model_path +
+                  ", error: " + status.ToString());
         loaded_ = false;
         return false;
     }
@@ -88,7 +88,7 @@ bool SentencePieceTokenizer::load(const std::string& model_path) {
     eos_id_ = processor_->eos_id();
     
     loaded_ = true;
-    LOG_INFO(std::string("SentencePiece 模型加载成功: ") + model_path +
+    LOG_INFO(std::string("SentencePiece model loaded: ") + model_path +
              ", pad_id=" + std::to_string(pad_id_) +
              ", bos_id=" + std::to_string(bos_id_) +
              ", eos_id=" + std::to_string(eos_id_));
@@ -97,8 +97,8 @@ bool SentencePieceTokenizer::load(const std::string& model_path) {
     // 简化模式：检查文件是否存在
     std::ifstream file(model_path);
     if (!file.is_open()) {
-        LOG_WARN(std::string("SentencePiece 模型文件不存在: ") + model_path +
-                 ", 使用字符级简化模式");
+        LOG_WARN(std::string("SentencePiece model file not found: ") + model_path +
+                 ", fallback to simple character-level mode");
         loaded_ = true;  // 标记为已加载，但使用简化模式
         return true;
     }

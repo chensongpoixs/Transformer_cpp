@@ -76,7 +76,7 @@ CudaStreamManager::CudaStreamManager(torch::Device device, int num_streams)
     }
     
     using namespace logging;
-    LOG_INFO("创建 " + std::to_string(num_streams) + " 个 CUDA Stream（流水线并行）");
+    LOG_INFO("Create " + std::to_string(num_streams) + " CUDA Streams (pipeline parallelism)");
 }
 
 CudaStreamManager::~CudaStreamManager() {
