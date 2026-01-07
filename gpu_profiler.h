@@ -94,6 +94,28 @@ public:
     // 获取GPU内存统计信息（使用 c10::cuda::CUDACachingAllocator::getMemoryStats）
     // 替代 torch::cuda::memory_stats，提供更底层和准确的内存信息
     static MemoryStats get_memory_stats(torch::Device device);
+    
+    // GPU 利用率分析结构体
+    struct UtilizationReport {
+        double collate_time_ms = 0.0;      // 数据加载时间（CPU）
+        double forward_time_ms = 0.0;      // 前向传播时间（GPU）
+        double backward_time_ms = 0.0;    // 反向传播时间（GPU）
+        double loss_time_ms = 0.0;         // 损失计算时间（GPU）
+        double total_time_ms = 0.0;        // 总时间
+        double gpu_utilization = 0.0;     // GPU 利用率（%）
+        double cpu_gpu_ratio = 0.0;        // CPU/GPU 时间比（>1 表示 CPU 是瓶颈）
+    };
+    
+    // 分析 GPU 利用率瓶颈
+    // 测量各个阶段的耗时，识别性能瓶颈
+    static UtilizationReport analyze_utilization(torch::Device device,
+                                                  double collate_time_ms,
+                                                  double forward_time_ms,
+                                                  double backward_time_ms,
+                                                  double loss_time_ms);
+    
+    // 打印 GPU 利用率分析报告
+    static void print_utilization_report(const UtilizationReport& report);
 
 private:
     static std::map<std::string, std::chrono::steady_clock::time_point> start_times_;

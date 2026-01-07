@@ -229,29 +229,36 @@ Batch MTDataset::collate_fn(const std::vector<size_t>& indices,
         //}
     }
     
-    // 使用SentencePiece分词器进行编码
+    // 使用SentencePiece分词器进行编码（批量分词，提升性能）
     std::vector<std::vector<int64_t>> src_tokens_list, tgt_tokens_list;
     
-    for (const auto& text : batch_src_text) {
-        std::vector<int> ids = sp_eng_->encode_as_ids(text);
+    // 批量分词：一次性编码整个 batch 的源/目标句子
+    std::vector<std::vector<int>> src_ids_batch = sp_eng_->encode_as_ids_batch(batch_src_text);
+    std::vector<std::vector<int>> tgt_ids_batch = sp_chn_->encode_as_ids_batch(batch_trg_text);
+    
+    src_tokens_list.reserve(src_ids_batch.size());
+    tgt_tokens_list.reserve(tgt_ids_batch.size());
+    
+    for (const auto& ids : src_ids_batch) {
         std::vector<int64_t> token_ids;
+        token_ids.reserve(ids.size() + 2);
         token_ids.push_back(bos_idx);
         for (int id : ids) {
             token_ids.push_back(id);
         }
         token_ids.push_back(eos_idx);
-        src_tokens_list.push_back(token_ids);
+        src_tokens_list.push_back(std::move(token_ids));
     }
     
-    for (const auto& text : batch_trg_text) {
-        std::vector<int> ids = sp_chn_->encode_as_ids(text);
+    for (const auto& ids : tgt_ids_batch) {
         std::vector<int64_t> token_ids;
+        token_ids.reserve(ids.size() + 2);
         token_ids.push_back(bos_idx);
         for (int id : ids) {
             token_ids.push_back(id);
         }
         token_ids.push_back(eos_idx);
-        tgt_tokens_list.push_back(token_ids);
+        tgt_tokens_list.push_back(std::move(token_ids));
     }
     
     // 找到最大长度
@@ -270,24 +277,44 @@ Batch MTDataset::collate_fn(const std::vector<size_t>& indices,
         LOG_DEBUG(oss.str());
     }*/
     
-    // 创建tensor并填充
-    auto src = torch::full({static_cast<int64_t>(indices.size()), max_src_len}, 
-                           pad_idx,
-                           torch::TensorOptions().dtype(torch::kLong).device(device));
-    auto trg = torch::full({static_cast<int64_t>(indices.size()), max_tgt_len},
-                           pad_idx,
-                           torch::TensorOptions().dtype(torch::kLong).device(device));
+    // ✅ 优化：先在 CPU 上构建完整数据，然后一次性传输到 GPU（非阻塞）
+    // 这样可以减少 CPU->GPU 同步传输次数，提高 GPU 利用率
     
+    // 在 CPU 上创建 tensor 并填充（快速，无同步）
+    auto src_cpu = torch::full({static_cast<int64_t>(indices.size()), max_src_len}, 
+                               pad_idx,
+                               torch::TensorOptions().dtype(torch::kLong));
+    auto trg_cpu = torch::full({static_cast<int64_t>(indices.size()), max_tgt_len},
+                               pad_idx,
+                               torch::TensorOptions().dtype(torch::kLong));
+    
+    // 在 CPU 上填充数据（快速，无 GPU 同步）
     for (size_t i = 0; i < src_tokens_list.size(); ++i) {
         for (size_t j = 0; j < src_tokens_list[i].size(); ++j) {
-            src[i][j] = src_tokens_list[i][j];
+            src_cpu[i][j] = src_tokens_list[i][j];
         }
     }
     
     for (size_t i = 0; i < tgt_tokens_list.size(); ++i) {
         for (size_t j = 0; j < tgt_tokens_list[i].size(); ++j) {
-            trg[i][j] = tgt_tokens_list[i][j];
+            trg_cpu[i][j] = tgt_tokens_list[i][j];
         }
+    }
+    
+    // ✅ 优化：使用 CUDA Stream 进行异步传输（流水线并行）
+    // 如果提供了 Stream，在指定 Stream 上传输；否则使用默认 Stream
+    torch::Tensor src, trg;
+    
+    // 检查是否可以使用 CUDA Stream（需要设备是 CUDA 且 LibTorch 支持）
+    if (device.is_cuda()) {
+        // 使用 non_blocking=true 进行异步传输
+        // 注意：LibTorch 的 to() 方法会自动使用当前 CUDA Stream
+        src = src_cpu.to(device, /*non_blocking=*/true);
+        trg = trg_cpu.to(device, /*non_blocking=*/true);
+    } else {
+        // CPU 模式，同步传输
+        src = src_cpu.to(device);
+        trg = trg_cpu.to(device);
     }
 
    /* {

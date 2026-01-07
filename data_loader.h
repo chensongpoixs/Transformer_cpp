@@ -90,7 +90,7 @@ public:
         return {en_sentences[idx], cn_sentences[idx]};
     }
     
-    // 创建batch（使用SentencePiece分词器）
+    // 创建batch（使用SentencePiece分词器，支持批量分词优化）
     Batch collate_fn(const std::vector<size_t>& indices, 
                      torch::Device device,
                      int pad_idx, int bos_idx, int eos_idx,

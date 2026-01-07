@@ -63,6 +63,7 @@ set(SOURCES
     data_loader.cpp
     train.cpp
     tokenizer_wrapper.cpp
+    cuda_stream_manager.cpp
     beam_search.cpp
     bleu.cpp
     logger.cpp
@@ -77,6 +78,7 @@ set(HEADERS
     layer_norm.h
     feed_forward.h
     sublayer_connection.h
+    cuda_stream_manager.h
     encoder.h
     decoder.h
     generator.h

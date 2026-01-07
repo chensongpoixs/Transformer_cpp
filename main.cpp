@@ -143,6 +143,30 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
             if (auto v = next(i)) config.tokenizer_eng = v;
         } else if (arg == "--tokenizer-chn") {
             if (auto v = next(i)) config.tokenizer_chn = v;
+        } else if (arg == "--prefetch") {
+            if (auto v = next(i)) {
+                std::string mode = v;
+                if (mode == "none") {
+                    config.prefetch_mode = 0;
+                } else if (mode == "async") {
+                    config.prefetch_mode = 1;
+                } else if (mode == "thread") {
+                    config.prefetch_mode = 2;
+                } else {
+                    try {
+                        int m = std::stoi(mode);
+                        if (m >= 0 && m <= 2) {
+                            config.prefetch_mode = m;
+                        } else {
+                            LOG_WARN("无效的 --prefetch 值(需为 0/1/2 或 none/async/thread): " + mode +
+                                     "，使用默认值 " + std::to_string(config.prefetch_mode));
+                        }
+                    } catch (...) {
+                        LOG_WARN("无法解析 --prefetch 参数: " + mode +
+                                 "，使用默认值 " + std::to_string(config.prefetch_mode));
+                    }
+                }
+            }
         } else if (arg == "--help" || arg == "-h") {
             show_help = true;
         } else {
@@ -161,6 +185,9 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
         LOG_INFO("  --epochs <int>             训练轮数 (默认: " + std::to_string(config.epoch_num) + ")");
         LOG_INFO("  --lr <float>               学习率 (默认: " + std::to_string(config.lr) + ")");
         LOG_INFO("  --workers <int>            数据加载线程数 (默认: " + std::to_string(config.workers) + ", 0=单线程)");
+        LOG_INFO("  --prefetch <mode>          数据预取模式: none|async|thread (默认: " +
+                 std::string(config.prefetch_mode == 0 ? "none" :
+                             config.prefetch_mode == 1 ? "async" : "thread") + ")");
         LOG_INFO("");
         LOG_INFO("模型相关:");
         LOG_INFO("  --d-model <int>            模型维度 (默认: " + std::to_string(config.d_model) + ")");
@@ -261,6 +288,7 @@ int main(int argc, char* argv[]) {
         oss << "配置: batch_size=" << config.batch_size
             << ", epoch_num=" << config.epoch_num
             << ", lr=" << config.lr
+            << ", prefetch_mode=" << config.prefetch_mode
             << ", train_data_path=" << config.train_data_path
             << ", dev_data_path=" << config.dev_data_path;
         LOG_INFO(oss.str());

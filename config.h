@@ -100,6 +100,10 @@ struct TransformerConfig {
     // 设备配置
     bool use_cuda = true;           // 是否使用CUDA
     int device_id = 0;              // GPU设备ID（或 "cpu"）
+
+    // 数据预取配置
+    // 0 = 不预取；1 = 使用 std::async 预取下一个 batch；2 = 使用 std::thread 预取下一个 batch
+    int prefetch_mode = 1;
 };
 
 #endif // TRANSFORMER_CONFIG_H

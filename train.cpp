@@ -52,6 +52,7 @@
 #include "tokenizer_wrapper.h"
 #include "logger.h"
 #include "gpu_profiler.h"
+#include "cuda_stream_manager.h"
 #include "json.hpp"
 #include <iomanip>
 #include <algorithm>
@@ -68,6 +69,8 @@
 #include <cuda_runtime.h>
 #include <fstream>
 #include <ctime>
+#include <future>
+#include <thread>
 
 
 namespace fs = std::filesystem;
@@ -325,17 +328,78 @@ static void print_progress_bar(int epoch, int total_epochs,
     }
 }
 
+// 辅助函数：根据当前 batch 索引获取一个 Batch（支持同步和预取模式）
+static Batch get_batch_for_index(size_t i,
+                                 int batch_size,
+                                 const std::vector<size_t>& indices,
+                                 MTDataset& dataset,
+                                 torch::Device device,
+                                 const TransformerConfig& config,
+                                 std::unique_ptr<CudaStreamManager>& stream_manager,
+                                 std::future<Batch>& next_batch_future,
+                                 bool& has_prefetch,
+                                 std::thread& prefetch_thread,
+                                 bool& prefetch_thread_running,
+                                 double& collate_time_ms) {
+    // 不使用预取，或这是第一个 batch：同步构建 batch
+    if (config.prefetch_mode == 0 || !has_prefetch || i == 0) {
+        size_t start_idx = i * batch_size;
+        size_t end_idx = std::min(start_idx + batch_size, indices.size());
+        std::vector<size_t> batch_indices(indices.begin() + start_idx,
+                                         indices.begin() + end_idx);
+        
+        auto collate_start = steady_clock::now();
+        GPUProfiler::start_timer("collate_fn");
+        
+        if (device.is_cuda() && stream_manager && i > 0) {
+            // 在传输 Stream 上准备当前 batch 的数据
+            stream_manager->set_current_stream(0);
+        }
+        
+        Batch b = dataset.collate_fn(batch_indices, device,
+                                     config.padding_idx, config.bos_idx, config.eos_idx,
+                                     config.src_vocab_size, config.tgt_vocab_size);
+        
+        GPUProfiler::end_timer("collate_fn");
+        auto collate_end = steady_clock::now();
+        collate_time_ms = duration_cast<microseconds>(collate_end - collate_start).count() / 1000.0;
+        return b;
+    } else {
+        // 使用预取结果
+        auto collate_start = steady_clock::now();
+        GPUProfiler::start_timer("collate_fn");
+        
+        Batch b = next_batch_future.get();
+        has_prefetch = false;
+        if (prefetch_thread_running) {
+            prefetch_thread.join();
+            prefetch_thread_running = false;
+        }
+        
+        GPUProfiler::end_timer("collate_fn");
+        auto collate_end = steady_clock::now();
+        collate_time_ms = duration_cast<microseconds>(collate_end - collate_start).count() / 1000.0;
+        return b;
+    }
+}
+
 // 返回 (平均损失, 总tokens数, 批次数量)
 std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
-                                                 Transformer model,
-                                                 LossCompute& loss_compute,
-                                                 int batch_size,
-                                                 torch::Device device,
-                                                 const TransformerConfig& config,
-                                                 bool is_training,
-                                                 int epoch,
-                                                 int total_epochs) {
-    
+                                               Transformer model,
+                                               LossCompute& loss_compute,
+                                               int batch_size,
+                                               torch::Device device,
+                                               const TransformerConfig& config,
+                                               bool is_training,
+                                               int epoch,
+                                               int total_epochs) {
+    // CUDA Stream 管理器：用于可选的流水线并行（CPU 模式下为空）
+    std::unique_ptr<CudaStreamManager> stream_manager;
+    if (device.is_cuda()) {
+        // 2 个 Stream：0 = 传输，1 = 计算
+        stream_manager = std::make_unique<CudaStreamManager>(device, 2);
+    }
+
     float total_tokens = 0.0f;
     float total_loss = 0.0f;
     
@@ -393,7 +457,7 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
                              ": 当前显存=" + std::to_string(mem_current / 1024 / 1024) + "MB, " +
                              "增长=" + std::to_string(mem_diff / 1024 / 1024) + "MB");
                 } catch (...) {
-                    // 忽略错误
+                    LOG_WARN("获取 bucket 显存统计信息时发生异常（已忽略）");
                 }
             }
             
@@ -443,24 +507,80 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         }
     }
     
+    // 数据预取相关
+    std::future<Batch> next_batch_future;
+    bool has_prefetch = false;
+    std::thread prefetch_thread;
+    bool prefetch_thread_running = false;
+    
+    auto launch_prefetch_async = [&](size_t next_batch_idx) {
+        return std::async(std::launch::async, [&dataset, &indices, batch_size, device, &config, next_batch_idx]() {
+            size_t start_idx = next_batch_idx * batch_size;
+            size_t end_idx = std::min(start_idx + batch_size, indices.size());
+            std::vector<size_t> batch_indices(indices.begin() + start_idx,
+                                              indices.begin() + end_idx);
+            return dataset.collate_fn(batch_indices, device,
+                                      config.padding_idx, config.bos_idx, config.eos_idx,
+                                      config.src_vocab_size, config.tgt_vocab_size);
+        });
+    };
+    
+    auto launch_prefetch_thread = [&](size_t next_batch_idx) {
+        std::promise<Batch> p;
+        next_batch_future = p.get_future();
+        prefetch_thread = std::thread([p = std::move(p), &dataset, &indices, batch_size, device, &config, next_batch_idx]() mutable {
+            size_t start_idx = next_batch_idx * batch_size;
+            size_t end_idx = std::min(start_idx + batch_size, indices.size());
+            std::vector<size_t> batch_indices(indices.begin() + start_idx,
+                                              indices.begin() + end_idx);
+            Batch b = dataset.collate_fn(batch_indices, device,
+                                         config.padding_idx, config.bos_idx, config.eos_idx,
+                                         config.src_vocab_size, config.tgt_vocab_size);
+            p.set_value(std::move(b));
+        });
+        prefetch_thread_running = true;
+    };
+    
     for (size_t i = 0; i < num_batches; ++i) {
-        size_t start_idx = i * batch_size;
-        size_t end_idx = std::min(start_idx + batch_size, indices.size());
+        double collate_time_ms = 0.0;
         
-        // 获取当前批次的索引
-        std::vector<size_t> batch_indices(indices.begin() + start_idx, 
-                                         indices.begin() + end_idx);
+        // 使用独立函数获取当前 batch（支持同步和预取模式）
+        Batch batch = get_batch_for_index(i, batch_size, indices, dataset, device,
+                                          config, stream_manager,
+                                          next_batch_future, has_prefetch,
+                                          prefetch_thread, prefetch_thread_running,
+                                          collate_time_ms);
         
-        // 创建batch（性能分析）
-        GPUProfiler::start_timer("collate_fn");
-        auto batch = dataset.collate_fn(batch_indices, device,
-                                       config.padding_idx, config.bos_idx, config.eos_idx,
-                                       config.src_vocab_size, config.tgt_vocab_size);
-        GPUProfiler::end_timer("collate_fn");
+        // 启动下一个 batch 的预取（如果需要）
+        if (config.prefetch_mode != 0 && i + 1 < num_batches) {
+            size_t next_batch_idx = i + 1;
+            if (config.prefetch_mode == 1) {
+                next_batch_future = launch_prefetch_async(next_batch_idx);
+                has_prefetch = true;
+            } else if (config.prefetch_mode == 2) {
+                launch_prefetch_thread(next_batch_idx);
+                has_prefetch = true;
+            }
+        }
+        
+        // ✅ 流水线并行：确保数据传输完成（只在第一个 batch 或需要时同步）
+        if (device.is_cuda() && stream_manager) {
+            if (i == 0) {
+                // 第一个 batch：确保数据传输完成
+                stream_manager->synchronize(0);  // 同步传输 Stream
+            } else {
+                // 后续 batch：等待上一个 batch 的计算完成，然后开始当前 batch 的计算
+                stream_manager->synchronize(1);  // 等待上一个 batch 的计算完成
+            }
+            
+            // 切换到计算 Stream 进行前向/反向传播
+            stream_manager->set_current_stream(1);
+        }
         
         // 前向传播（性能分析）
         // 验证阶段使用 NoGradGuard 避免构建计算图，节省显存
         torch::Tensor out;
+        auto forward_start = steady_clock::now();
         if (is_training) {
             GPUProfiler::start_timer("forward");
             out = model->forward(batch.src, batch.trg, batch.src_mask, batch.trg_mask);
@@ -471,16 +591,26 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
             out = model->forward(batch.src, batch.trg, batch.src_mask, batch.trg_mask);
             GPUProfiler::end_timer("forward");
         }
+        auto forward_end = steady_clock::now();
+        double forward_time_ms = duration_cast<microseconds>(forward_end - forward_start).count() / 1000.0;
         
         // 计算损失（性能分析）
+        auto loss_start = steady_clock::now();
         GPUProfiler::start_timer("loss_compute");
         float loss = loss_compute(out, batch.trg_y, static_cast<float>(batch.ntokens));
         GPUProfiler::end_timer("loss_compute");
+        auto loss_end = steady_clock::now();
+        double loss_time_ms = duration_cast<microseconds>(loss_end - loss_start).count() / 1000.0;
         
-        // 累加
+        // ✅ 优化：延迟 loss 提取，减少同步操作
+        // loss.item<float>() 已经在 loss_compute 内部调用，这里不需要再次同步
+        // 如果需要进一步优化，可以将 loss 提取移到循环外批量处理
+        
+        // 累加（batch 大小从 batch.src 的第 0 维获取，兼容预取路径）
         total_loss += loss * batch.ntokens;
         total_tokens += batch.ntokens;
-        processed_samples += batch_indices.size();
+        size_t current_batch_size = static_cast<size_t>(batch.src.size(0));
+        processed_samples += current_batch_size;
         
         // ✅ 立即释放所有张量（关键修复：防止显存泄漏）
         // 训练和验证阶段都需要释放，避免张量引用累积
@@ -491,8 +621,9 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         batch.src_mask = torch::Tensor();
         batch.trg_mask = torch::Tensor();
         
-        // 记录显存使用（每10个batch记录一次，或每个bucket结束时记录）
-        if (device.is_cuda() && ((i + 1) % 10 == 0 || (i + 1) % bucket_size == 0)) {
+    // ✅ 优化：减少显存统计频率，避免频繁同步
+    // 每 50 个 batch 或每个 bucket 结束时记录（减少同步操作）
+    if (device.is_cuda() && ((i + 1) % 50 == 0 || (i + 1) % bucket_size == 0)) {
             try {
                 auto stats = GPUProfiler::get_memory_stats(device);
                 size_t mem_current = stats.allocated_bytes_current;
@@ -519,7 +650,7 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
                              "释放=" + std::to_string((mem_current - mem_after_cache) / 1024 / 1024) + "MB");
                 }
             } catch (...) {
-                // 忽略错误
+                LOG_WARN("获取批次显存统计或清理缓存时发生异常（已忽略）");
             }
         }
         
@@ -543,10 +674,13 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
             eta = remaining_samples / speed;
         }
         
-        // 显示 YOLOv5 风格的表格格式实时更新（每个 batch 都更新）
-        print_progress_bar(epoch, total_epochs, i, num_batches,
-                          loss, avg_loss_so_far, speed, eta, is_training, device, elapsed_time,
-                          static_cast<long long>(total_tokens), num_batches);
+        // ✅ 优化：减少进度条更新频率，避免频繁输出影响性能
+        // 每 10 个 batch 或最后一个 batch 更新一次
+        if (i % 10 == 0 || i == num_batches - 1) {
+            print_progress_bar(epoch, total_epochs, i, num_batches,
+                              loss, avg_loss_so_far, speed, eta, is_training, device, elapsed_time,
+                              static_cast<long long>(total_tokens), num_batches);
+        }
         
         // 定期清理CUDA缓存（每50个batch清理一次，避免频繁清理影响性能）
         if (device.is_cuda() && (i + 1) % 50 == 0) {
@@ -554,10 +688,37 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         }
     }
     
+    // 确保预取线程在函数结束前被正确回收
+    if (prefetch_thread_running) {
+        try {
+            prefetch_thread.join();
+        } catch (...) {
+            LOG_WARN("预取线程 join 失败（已忽略）");
+        }
+    }
+    
     // 性能分析：在第一个epoch结束后打印
     if (epoch == 1 && is_training) {
         GPUProfiler::print_summary();
         GPUProfiler::check_gpu_utilization(device);
+        
+        // ✅ 新增：打印 GPU 利用率诊断和建议
+        LOG_INFO("========== GPU 利用率诊断 ==========");
+        LOG_INFO("提示: 如果 GPU 利用率 < 50%，可能原因：");
+        LOG_INFO("  1. 数据加载是瓶颈（CPU 处理慢，GPU 等待）");
+        LOG_INFO("     - 解决方案：已优化为批量非阻塞传输");
+        LOG_INFO("     - 建议：增加 --workers 参数使用多线程加载");
+        LOG_INFO("  2. Batch size 太小，无法充分利用 GPU");
+        LOG_INFO("     - 解决方案：增加 --batch-size 参数（如 64、128）");
+        LOG_INFO("     - 当前 batch_size=" + std::to_string(config.batch_size));
+        LOG_INFO("  3. 同步操作过多");
+        LOG_INFO("     - 解决方案：已减少显存统计频率（每50个batch）");
+        LOG_INFO("     - 解决方案：已优化进度条更新频率（每10个batch）");
+        LOG_INFO("  4. 模型太小，计算量不足");
+        LOG_INFO("     - 解决方案：增加模型大小（--d-model, --n-layers）");
+        LOG_INFO("     - 当前 d_model=" + std::to_string(config.d_model) + 
+                 ", n_layers=" + std::to_string(config.n_layers));
+        LOG_INFO("====================================");
     }
     
     // epoch结束后清理CUDA缓存（使用 CUDACachingAllocator::emptyCache 替代 torch::cuda::empty_cache）

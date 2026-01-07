@@ -154,7 +154,9 @@ void GPUProfiler::check_gpu_utilization(torch::Device device) {
     LOG_INFO("GPU数量: " + std::to_string(num_gpus));
     
     // 检查当前设备
-    int current_device = device.index();
+    // 为了兼容不同版本的 LibTorch，避免直接调用 device.index()
+    // 使用 torch::cuda::current_device() 获取当前 GPU 索引
+    int current_device = at::cuda::current_device(); //torch::cuda::current_device();
     LOG_INFO("当前使用GPU: " + std::to_string(current_device));
     
     // 获取GPU属性
@@ -295,7 +297,9 @@ GPUProfiler::MemoryStats GPUProfiler::get_memory_stats(torch::Device device) {
         // 使用 c10::cuda::CUDACachingAllocator::getDeviceStats 获取内存统计
         // 这是 LibTorch C++ 中获取 CUDA 内存统计的底层 API
         // 对应 Python 中的 torch.cuda.memory_stats()
-        auto device_stats = c10::cuda::CUDACachingAllocator::getDeviceStats(device.index());
+        // 为了避免对 Device.index() 的依赖，这里使用当前 CUDA 设备索引
+        int dev_index = c10::cuda::current_device();
+        auto device_stats = c10::cuda::CUDACachingAllocator::getDeviceStats(dev_index);
         
         // DeviceStats 结构体包含多个统计项
         // 使用 StatType::AGGREGATE 获取聚合统计（对应 Python 中的 "all"）
@@ -321,8 +325,122 @@ GPUProfiler::MemoryStats GPUProfiler::get_memory_stats(torch::Device device) {
     } catch (const std::exception& e) {
         // 如果获取失败，返回全零的统计信息
         // 调用者应该检查返回值
+        std::stringstream cmd;
+        cmd << "Get c10::cuda::CUDACachingAllocator::getDeviceStats function :"<< e.what();
+        LOG_WARN(cmd.str());
     }
     
     return stats;
+}
+
+GPUProfiler::UtilizationReport GPUProfiler::analyze_utilization(torch::Device device,
+                                                                 double collate_time_ms,
+                                                                 double forward_time_ms,
+                                                                 double backward_time_ms,
+                                                                 double loss_time_ms) {
+    GPUProfiler::UtilizationReport report;
+    report.collate_time_ms = collate_time_ms;
+    report.forward_time_ms = forward_time_ms;
+    report.backward_time_ms = backward_time_ms;
+    report.loss_time_ms = loss_time_ms;
+    report.total_time_ms = collate_time_ms + forward_time_ms + backward_time_ms + loss_time_ms;
+    
+    // 计算 GPU 计算时间（forward + backward + loss）
+    double gpu_compute_time = forward_time_ms + backward_time_ms + loss_time_ms;
+    
+    // GPU 利用率 = GPU 计算时间 / 总时间
+    if (report.total_time_ms > 0.0) {
+        report.gpu_utilization = (gpu_compute_time / report.total_time_ms) * 100.0;
+    }
+    
+    // CPU/GPU 时间比（>1 表示 CPU 是瓶颈）
+    if (gpu_compute_time > 0.0) {
+        report.cpu_gpu_ratio = collate_time_ms / gpu_compute_time;
+    }
+    
+    return report;
+}
+
+void GPUProfiler::print_utilization_report(const GPUProfiler::UtilizationReport& report) {
+    using namespace logging;
+    
+    LOG_INFO("========== GPU 利用率分析 ==========");
+    LOG_INFO("时间分布:");
+    {
+        std::ostringstream oss;
+        oss << "  数据加载 (CPU): " << std::fixed << std::setprecision(2) 
+            << report.collate_time_ms << " ms (" 
+            << (report.total_time_ms > 0 ? (report.collate_time_ms / report.total_time_ms * 100.0) : 0.0) << "%)";
+        LOG_INFO(oss.str());
+    }
+    {
+        std::ostringstream oss;
+        oss << "  前向传播 (GPU): " << std::fixed << std::setprecision(2) 
+            << report.forward_time_ms << " ms (" 
+            << (report.total_time_ms > 0 ? (report.forward_time_ms / report.total_time_ms * 100.0) : 0.0) << "%)";
+        LOG_INFO(oss.str());
+    }
+    {
+        std::ostringstream oss;
+        oss << "  反向传播 (GPU): " << std::fixed << std::setprecision(2) 
+            << report.backward_time_ms << " ms (" 
+            << (report.total_time_ms > 0 ? (report.backward_time_ms / report.total_time_ms * 100.0) : 0.0) << "%)";
+        LOG_INFO(oss.str());
+    }
+    {
+        std::ostringstream oss;
+        oss << "  损失计算 (GPU): " << std::fixed << std::setprecision(2) 
+            << report.loss_time_ms << " ms (" 
+            << (report.total_time_ms > 0 ? (report.loss_time_ms / report.total_time_ms * 100.0) : 0.0) << "%)";
+        LOG_INFO(oss.str());
+    }
+    {
+        std::ostringstream oss;
+        oss << "  总时间: " << std::fixed << std::setprecision(2) 
+            << report.total_time_ms << " ms";
+        LOG_INFO(oss.str());
+    }
+    
+    LOG_INFO("性能指标:");
+    {
+        std::ostringstream oss;
+        oss << "  GPU 利用率: " << std::fixed << std::setprecision(1) 
+            << report.gpu_utilization << "%";
+        LOG_INFO(oss.str());
+    }
+    {
+        std::ostringstream oss;
+        oss << "  CPU/GPU 时间比: " << std::fixed << std::setprecision(2) 
+            << report.cpu_gpu_ratio;
+        if (report.cpu_gpu_ratio > 1.0) {
+            oss << " ⚠️ CPU 是瓶颈（数据加载太慢）";
+        } else if (report.cpu_gpu_ratio > 0.5) {
+            oss << " ⚠️ CPU 可能成为瓶颈";
+        } else {
+            oss << " ✅ CPU 不是瓶颈";
+        }
+        LOG_INFO(oss.str());
+    }
+    
+    LOG_INFO("优化建议:");
+    if (report.cpu_gpu_ratio > 1.0) {
+        LOG_WARN("  1. 数据加载是主要瓶颈，建议：");
+        LOG_WARN("     - 使用非阻塞数据传输（已实现）");
+        LOG_WARN("     - 增加数据加载线程数（--workers）");
+        LOG_WARN("     - 考虑数据预取");
+    }
+    if (report.gpu_utilization < 50.0) {
+        LOG_WARN("  2. GPU 利用率低，建议：");
+        LOG_WARN("     - 增加 batch size（--batch-size）");
+        LOG_WARN("     - 减少同步操作");
+        LOG_WARN("     - 检查是否有其他进程占用 GPU");
+    }
+    if (report.forward_time_ms < report.collate_time_ms) {
+        LOG_WARN("  3. GPU 计算时间 < 数据加载时间，建议：");
+        LOG_WARN("     - 增加 batch size 以增加 GPU 计算时间");
+        LOG_WARN("     - 优化数据加载流程");
+    }
+    
+    LOG_INFO("====================================");
 }
 

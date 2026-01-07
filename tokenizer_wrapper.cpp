@@ -129,6 +129,37 @@ std::vector<int> SentencePieceTokenizer::encode_as_ids(const std::string& text) 
     return encode_simple(text);
 }
 
+std::vector<std::vector<int>> SentencePieceTokenizer::encode_as_ids_batch(const std::vector<std::string>& texts) {
+    std::vector<std::vector<int>> result;
+    if (!loaded_) {
+        return result;
+    }
+    
+#ifdef USE_SENTENCEPIECE
+    // 使用真正的SentencePiece库：逐条调用 Encode，保持接口兼容性
+    if (processor_) {
+        result.reserve(texts.size());
+        for (const auto& t : texts) {
+            std::vector<int> ids;
+            auto status = processor_->Encode(t, &ids);
+            if (!status.ok()) {
+                LOG_WARN(std::string("SentencePiece 批量编码单条文本失败: ") + status.ToString());
+                result.emplace_back();  // 保持对齐，推入空结果
+            } else {
+                result.push_back(std::move(ids));
+            }
+        }
+        return result;
+    }
+#endif
+    // 简化模式或未初始化 SentencePiece 时，逐条调用 encode_as_ids
+    result.reserve(texts.size());
+    for (const auto& t : texts) {
+        result.push_back(encode_as_ids(t));
+    }
+    return result;
+}
+
 std::string SentencePieceTokenizer::decode_ids(const std::vector<int>& ids) {
     if (!loaded_) {
         return "";

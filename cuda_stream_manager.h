@@ -12,14 +12,16 @@
 /*****************************************************************************
 				   Author: chensong
 				   date:  2026-01-01
- * 分词器包装器 (Tokenizer Wrapper)
+ * CUDA Stream 管理器 (CUDA Stream Manager)
  * 
- * 封装 SentencePiece 分词器的 C++ API，提供：
- * - 文本编码：将文本转换为 token ID 序列
- * - 文本解码：将 token ID 序列转换回文本
- * - 支持英文和中文分词器
+ * 用于管理多个 CUDA Stream，实现流水线并行：
+ * - 数据传输 Stream：用于 CPU->GPU 数据传输
+ * - 计算 Stream：用于 GPU 计算（前向传播、反向传播）
  * 
- * 使用 SentencePiece 进行子词（subword）分词，能够处理未登录词（OOV）
+ * 流水线并行原理：
+ * 1. 在 Stream 0 上传输 batch N 的数据
+ * 2. 在 Stream 1 上计算 batch N-1 的前向/反向传播
+ * 3. 让数据传输和计算重叠，提高 GPU 利用率
 				   
 				   
 				   
@@ -42,117 +44,95 @@
 
  ******************************************************************************/
 
-#ifndef TRANSFORMER_TOKENIZER_WRAPPER_H
-#define TRANSFORMER_TOKENIZER_WRAPPER_H
+#ifndef TRANSFORMER_CUDA_STREAM_MANAGER_H
+#define TRANSFORMER_CUDA_STREAM_MANAGER_H
 
-#include <string>
+#include <torch/torch.h>
+#include <c10/cuda/CUDAStream.h>
 #include <vector>
 #include <memory>
 
-// 如果定义了USE_SENTENCEPIECE，使用真正的SentencePiece库
-#ifdef USE_SENTENCEPIECE
-#include <sentencepiece_processor.h>
-#endif
-
 /**
- * SentencePiece分词器包装类
- * 支持两种模式：
- * 1. 使用真正的SentencePiece库（定义USE_SENTENCEPIECE）
- * 2. 使用简化版本（fallback，基于字符的编码）
+ * CUDA Stream 管理器
+ * 用于实现流水线并行，提高 GPU 利用率
  */
-class SentencePieceTokenizer {
+class CudaStreamManager {
 public:
-    SentencePieceTokenizer();
-    ~SentencePieceTokenizer();
+    /**
+     * 构造函数
+     * @param device GPU 设备
+     * @param num_streams Stream 数量（默认 2：1 个用于数据传输，1 个用于计算）
+     */
+    explicit CudaStreamManager(torch::Device device, int num_streams = 2);
     
     /**
-     * 加载分词器模型
-     * @param model_path 模型文件路径（.model文件）
-     * @return 是否加载成功
+     * 析构函数
      */
-    bool load(const std::string& model_path);
+    ~CudaStreamManager();
     
     /**
-     * 将文本编码为token ID列表
-     * @param text 输入文本
-     * @return token ID列表
+     * 获取数据传输 Stream
+     * 用于 CPU->GPU 数据传输
      */
-    std::vector<int> encode_as_ids(const std::string& text);
+    at::cuda::CUDAStream& get_transfer_stream() {
+        return *transfer_stream_;
+    }
     
     /**
-     * 批量将文本编码为 token ID 列表（批量分词，性能更高）
-     * @param texts 输入文本列表
-     * @return 每个文本对应的 token ID 列表
+     * 获取计算 Stream
+     * 用于 GPU 计算（前向传播、反向传播）
      */
-    std::vector<std::vector<int>> encode_as_ids_batch(const std::vector<std::string>& texts);
+    at::cuda::CUDAStream& get_compute_stream() {
+        return *compute_stream_;
+    }
     
     /**
-     * 将token ID列表解码为文本
-     * @param ids token ID列表
-     * @return 解码后的文本
+     * 获取指定索引的 Stream
+     * @param index Stream 索引（0 为数据传输，1 为计算）
      */
-    std::string decode_ids(const std::vector<int>& ids);
+    at::cuda::CUDAStream& get_stream(int index) {
+        return *streams_[index];
+    }
     
     /**
-     * 获取PAD token ID
+     * 获取 Stream 数量
      */
-    int pad_id() const { return pad_id_; }
+    int num_streams() const {
+        return static_cast<int>(streams_.size());
+    }
     
     /**
-     * 获取BOS token ID
+     * 同步所有 Stream
+     * 等待所有 Stream 上的操作完成
      */
-    int bos_id() const { return bos_id_; }
+    void synchronize_all();
     
     /**
-     * 获取EOS token ID
+     * 同步指定 Stream
+     * @param index Stream 索引
      */
-    int eos_id() const { return eos_id_; }
+    void synchronize(int index);
     
     /**
-     * 检查是否已加载
+     * 设置当前 Stream（用于后续操作）
+     * @param index Stream 索引
      */
-    bool is_loaded() const { return loaded_; }
+    void set_current_stream(int index);
+    
+    /**
+     * 获取设备
+     */
+    torch::Device device() const {
+        return device_;
+    }
 
 private:
-    bool loaded_ = false;
-    int pad_id_ = 0;
-    int bos_id_ = 2;
-    int eos_id_ = 3;
-    
-#ifdef USE_SENTENCEPIECE
-    // 使用真正的SentencePiece处理器
-    std::unique_ptr<sentencepiece::SentencePieceProcessor> processor_;
-#else
-    // 简化模式：使用字符级编码
-    void* processor_ = nullptr;
-#endif
-    
-    // 简化模式的编码/解码方法
-    std::vector<int> encode_simple(const std::string& text);
-    std::string decode_simple(const std::vector<int>& ids);
+    torch::Device device_;
+    // 使用 at::cuda::CUDAStream（等价于旧版 torch::cuda::Stream）
+    std::vector<std::unique_ptr<at::cuda::CUDAStream>> streams_;
+    at::cuda::CUDAStream* transfer_stream_ = nullptr;  // 数据传输 Stream（指向 streams_ 中的元素）
+    at::cuda::CUDAStream* compute_stream_ = nullptr;   // 计算 Stream（指向 streams_ 中的元素）
 };
 
-/**
- * 加载英文分词器（使用默认路径）
- */
-std::shared_ptr<SentencePieceTokenizer> english_tokenizer_load();
-
-/**
- * 加载中文分词器（使用默认路径）
- */
-std::shared_ptr<SentencePieceTokenizer> chinese_tokenizer_load();
-
-/**
- * 加载英文分词器（指定路径）
- * @param model_path 分词器模型文件路径
- */
-std::shared_ptr<SentencePieceTokenizer> english_tokenizer_load(const std::string& model_path);
-
-/**
- * 加载中文分词器（指定路径）
- * @param model_path 分词器模型文件路径
- */
-std::shared_ptr<SentencePieceTokenizer> chinese_tokenizer_load(const std::string& model_path);
-
-#endif // TRANSFORMER_TOKENIZER_WRAPPER_H
+#endif // TRANSFORMER_CUDA_STREAM_MANAGER_H
 
