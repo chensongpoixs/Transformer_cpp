@@ -49,6 +49,8 @@
 
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAFunctions.h>
+#include <ATen/cuda/CUDAEvent.h>
 #include <vector>
 #include <memory>
 
@@ -125,6 +127,52 @@ public:
     torch::Device device() const {
         return device_;
     }
+    
+    /**
+     * 创建 CUDA Event（业界标准：用于非阻塞同步）
+     * @return CUDA Event
+     */
+    at::cuda::CUDAEvent create_event() const {
+        /*
+        
+        C++ 枚举值 (at::cuda::EventFlag) 	对应 CUDA 宏	含义与用途
+        (默认/不传参)	cudaEventDefault	默认模式。支持计时，使用 CPU 忙等进行同步。
+        DisableTiming	cudaEventDisableTiming	性能优化首选。禁用计时功能。这可以显著减少 GPU 显存占用并提升流间同步的速度。
+        BlockingSync	cudaEventBlockingSync	阻塞同步。当调用 synchronize() 时，会让 CPU 线程进入休眠而非忙等，节省 CPU 资源但可能增加唤醒延迟。
+        Interprocess	cudaEventInterprocess	跨进程/IPC。允许该事件被其他进程获取（需配合 cudaIpcGetEventHandle 使用
+        */
+        return at::cuda::CUDAEvent(cudaEventBlockingSync);
+    }
+    
+    /**
+     * 在指定 Stream 上记录 Event（业界标准）
+     * @param event CUDA Event
+     * @param stream_index Stream 索引
+     */
+    void record_event(at::cuda::CUDAEvent& event, int stream_index) const {
+        if (!device_.is_cuda() || stream_index < 0 || stream_index >= static_cast<int>(streams_.size())) {
+            return;
+        }
+        if (streams_[stream_index]) {
+            event.record(*streams_[stream_index]);
+        }
+    }
+    
+    /**
+     * 查询 Event 是否完成（非阻塞，业界标准）
+     * @param event CUDA Event
+     * @return true 如果事件已完成，false 如果未完成
+     */
+    bool query_event(const at::cuda::CUDAEvent& event) const {
+        return event.query();
+    }
+    
+    /**
+     * 使指定 Stream 等待 Event 完成（业界标准：Stream 等待 Event）
+     * @param event CUDA Event
+     * @param stream_index Stream 索引
+     */
+    void wait_event_on_stream(const at::cuda::CUDAEvent& event, int stream_index) const;
 
 private:
     torch::Device device_;

@@ -49,6 +49,8 @@
 #include "train.h"
 #include "beam_search.h"
 #include "multi_process_loader.h"
+#include "data_cache.h"
+#include "amp_scaler.h"
 #include "bleu.h"
 #include "tokenizer_wrapper.h"
 #include "logger.h"
@@ -67,6 +69,7 @@
 #include <chrono>
 #include <cmath>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAFunctions.h>
 #include <cuda_runtime.h>
 #include <fstream>
 #include <ctime>
@@ -374,8 +377,13 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
     // CUDA Stream 管理器：用于可选的流水线并行（CPU 模式下为空）
     std::unique_ptr<CudaStreamManager> stream_manager;
     if (device.is_cuda()) {
-        // 2 个 Stream：0 = 传输，1 = 计算
-        stream_manager = std::make_unique<CudaStreamManager>(device, 2);
+        // ✅ 阶段 2：4 个 Stream 实现深度流水线
+        // Stream 0: 数据传输（Batch N+1）
+        // Stream 1: 前向传播（Batch N）
+        // Stream 2: 反向传播（Batch N）
+        // Stream 3: 数据传输（Batch N+2）
+        stream_manager = std::make_unique<CudaStreamManager>(device, 4);
+        LOG_INFO("Using 4 CUDA Streams for deep pipeline parallelism");
     }
 
     float total_tokens = 0.0f;
@@ -385,6 +393,17 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
     std::vector<torch::Tensor> loss_tensor_buffer;  // 累积 loss tensor
     std::vector<float> ntokens_buffer;              // 对应的 token 数量
     const size_t LOSS_EXTRACT_INTERVAL = 10;        // 每 10 个 batch 提取一次
+    
+    // ✅ 方案 2 + 方案 3：Event 同步 + 减少同步频率（业界标准 + YOLOv5 策略）
+    at::cuda::CUDAEvent compute_event;
+    const size_t SYNC_INTERVAL = 10;  // 每 10 个 batch 同步一次（与延迟 loss 提取一致）
+    bool event_initialized = false;
+    
+    // ✅ 阶段 2：4 个 Stream 深度流水线 - Event 管理
+    at::cuda::CUDAEvent transfer_event;      // 数据传输完成事件
+    at::cuda::CUDAEvent forward_event;       // 前向传播完成事件
+    at::cuda::CUDAEvent backward_event;      // 反向传播完成事件
+    bool events_initialized = false;
     
     // 基于句子长度的 bucket 采样策略
     // 1. 先按长度排序得到索引
@@ -490,11 +509,20 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         }
     }
     
+    // ✅ 阶段 3：数据缓存（如果启用）
+    std::unique_ptr<DataCache> data_cache;
+    bool use_data_cache = (config.cache_size > 0 && device.is_cuda());
+    
     // ✅ 使用多进程数据加载器（如果 workers > 0）
     std::unique_ptr<MultiProcessDataLoader> multi_loader;
     bool use_multi_loader = (config.workers > 0);
     
-    if (use_multi_loader) {
+    if (use_data_cache) {
+        // 创建数据缓存（预加载多个 batch 到 GPU）
+        data_cache = std::make_unique<DataCache>(config.cache_size, device);
+        data_cache->start_prefetch(dataset, indices, batch_size, config);
+        LOG_INFO("Using GPU data cache: cache_size=" + std::to_string(config.cache_size));
+    } else if (use_multi_loader) {
         // 创建多进程数据加载器
         multi_loader = std::make_unique<MultiProcessDataLoader>(
             dataset, indices, batch_size, device, config,
@@ -504,12 +532,33 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
                  ", pin_memory=" + std::string(config.pin_memory ? "true" : "false"));
     }
     
+    // ✅ 阶段 3：混合精度训练（如果启用）
+    std::unique_ptr<AMPScaler> amp_scaler;
+    bool use_amp = (config.use_amp && device.is_cuda() && is_training);
+    if (use_amp) {
+        amp_scaler = std::make_unique<AMPScaler>(config.amp_init_scale, config.amp_scale_window);
+        LOG_INFO("Using mixed precision training (FP16): init_scale=" + 
+                 std::to_string(config.amp_init_scale) + ", scale_window=" + 
+                 std::to_string(config.amp_scale_window));
+    }
+    
     for (size_t i = 0; i < num_batches; ++i) {
         double collate_time_ms = 0.0;
         
-        // 使用多进程加载器或单线程加载
+        // ✅ 阶段 3：优先使用数据缓存，其次多进程加载器，最后单线程加载
         Batch batch;
-        if (use_multi_loader && multi_loader) {
+        if (use_data_cache && data_cache) {
+            auto collate_start = steady_clock::now();
+            batch = data_cache->get_next();
+            auto collate_end = steady_clock::now();
+            collate_time_ms = duration_cast<microseconds>(collate_end - collate_start).count() / 1000.0;
+            
+            // 检查是否加载完成
+            if (!batch.src.defined()) {
+                LOG_DEBUG("Data cache finished at batch " + std::to_string(i));
+                break;
+            }
+        } else if (use_multi_loader && multi_loader) {
             auto collate_start = steady_clock::now();
             batch = multi_loader->next();
             auto collate_end = steady_clock::now();
@@ -526,27 +575,74 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
                                         config, stream_manager, collate_time_ms);
         }
         
-        // ✅ 流水线并行：确保数据传输完成（只在第一个 batch 或需要时同步）
+        // ✅ 阶段 2：4 个 Stream 深度流水线 + Event 同步（业界标准）
         if (device.is_cuda() && stream_manager) {
-            if (i == 0) {
-                // 第一个 batch：确保数据传输完成
-                stream_manager->synchronize(0);  // 同步传输 Stream
-            } else {
-                // 后续 batch：等待上一个 batch 的计算完成，然后开始当前 batch 的计算
-                stream_manager->synchronize(1);  // 等待上一个 batch 的计算完成
+            // 初始化所有 Event（第一个 batch）
+            if (!events_initialized) {
+                transfer_event = stream_manager->create_event();
+                forward_event = stream_manager->create_event();
+                backward_event = stream_manager->create_event();
+                compute_event = stream_manager->create_event();
+                events_initialized = true;
+                event_initialized = true;
             }
             
-            // 切换到计算 Stream 进行前向/反向传播
+            if (i == 0) {
+                // 第一个 batch：等待数据传输完成
+                stream_manager->synchronize(0);  // 第一个 batch 需要同步传输
+                // 记录传输完成事件
+                stream_manager->set_current_stream(0);
+                stream_manager->record_event(transfer_event, 0);
+            } else {
+                // 后续 batch：使用 Event 同步 Stream 依赖
+                // 只在必要时同步（每 10 个 batch 或最后一个 batch）
+                bool should_sync = ((i + 1) % SYNC_INTERVAL == 0) || (i == num_batches - 1);
+                
+                if (should_sync) {
+                    // 批量同步：等待上一个 batch 的计算完成
+                    backward_event.synchronize();
+                } else {
+                    // 非阻塞检查：不阻塞 CPU
+                    if (!stream_manager->query_event(backward_event)) {
+                        // 事件未完成，但不等待，让 GPU 继续工作
+                    }
+                }
+                
+                // Stream 0: 记录当前 batch 的传输完成事件
+                // 数据传输已在 collate_fn 中完成（使用 non_blocking=true）
+                stream_manager->set_current_stream(0);
+                stream_manager->record_event(transfer_event, 0);
+            }
+            
+            // Stream 1: 前向传播（等待传输完成）
+            if (stream_manager->num_streams() >= 2) {
+                // ✅ 修复：使用 CudaStreamManager 的 wait_event_on_stream 方法
+                stream_manager->wait_event_on_stream(transfer_event, 1);  // Stream 1 等待传输完成
+            }
             stream_manager->set_current_stream(1);
         }
         
-        // 前向传播（性能分析）
+        // ✅ 阶段 3：前向传播（支持混合精度训练）
         // 验证阶段使用 NoGradGuard 避免构建计算图，节省显存
         torch::Tensor out;
         auto forward_start = steady_clock::now();
         if (is_training) {
             GPUProfiler::start_timer("forward");
-            out = model->forward(batch.src, batch.trg, batch.src_mask, batch.trg_mask);
+            if (use_amp) {
+                // 混合精度训练：将输入转换为 FP16
+                auto src_fp16 = batch.src.to(torch::kFloat16);
+                auto trg_fp16 = batch.trg.to(torch::kFloat16);
+                auto src_mask_fp16 = batch.src_mask.to(torch::kFloat16);
+                auto trg_mask_fp16 = batch.trg_mask.to(torch::kFloat16);
+                
+                // 前向传播（FP16）
+                out = model->forward(src_fp16, trg_fp16, src_mask_fp16, trg_mask_fp16);
+                // 输出转换为 FP32（用于 loss 计算）
+                out = out.to(torch::kFloat32);
+            } else {
+                // FP32 训练
+                out = model->forward(batch.src, batch.trg, batch.src_mask, batch.trg_mask);
+            }
             GPUProfiler::end_timer("forward");
         } else {
             torch::NoGradGuard no_grad;
@@ -557,17 +653,75 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         auto forward_end = steady_clock::now();
         double forward_time_ms = duration_cast<microseconds>(forward_end - forward_start).count() / 1000.0;
         
-        // 计算损失（性能分析）
+        // ✅ 阶段 2：记录前向传播完成事件
+        if (device.is_cuda() && stream_manager && events_initialized) {
+            stream_manager->record_event(forward_event, 1);  // 在 Stream 1 上记录前向完成事件
+        }
+        
+        // ✅ 阶段 2：Stream 2 等待前向传播完成
+        if (device.is_cuda() && stream_manager && stream_manager->num_streams() >= 3) {
+            // ✅ 修复：使用 CudaStreamManager 的 wait_event_on_stream 方法
+            stream_manager->wait_event_on_stream(forward_event, 2);  // Stream 2 等待前向完成
+            stream_manager->set_current_stream(2);  // 切换到 Stream 2 进行反向传播
+        }
+        
+        // ✅ 阶段 3：计算损失（支持混合精度训练）
         auto loss_start = steady_clock::now();
         GPUProfiler::start_timer("loss_compute");
         
-        // ✅ 方案 1：延迟 loss 提取 - 返回 loss tensor，不立即提取
-        auto [loss_tensor, has_backward] = loss_compute.compute_loss_tensor(
-            out, batch.trg_y, static_cast<float>(batch.ntokens));
+        torch::Tensor loss_tensor;
+        bool has_backward = false;
+        
+        if (use_amp && amp_scaler && is_training) {
+            // 混合精度训练：分离反向传播和优化器更新
+            // 1. 计算 loss（不执行反向传播）
+            loss_tensor = loss_compute.compute_loss_and_backward(
+                out, batch.trg_y, static_cast<float>(batch.ntokens));
+            
+            // 2. 缩放 loss（在反向传播之前）
+            loss_tensor = amp_scaler->scale(loss_tensor);
+            
+            // 3. 执行反向传播（loss 已缩放）
+            loss_tensor.backward();
+            
+            // 4. 取消缩放梯度
+            auto base_optimizer = loss_compute.get_base_optimizer();
+            if (base_optimizer) {
+                amp_scaler->unscale(base_optimizer);
+            }
+            
+            // 5. 如果梯度溢出，跳过优化器更新
+            if (!amp_scaler->has_overflow()) {
+                loss_compute.optimizer_step();
+                has_backward = true;
+            } else {
+                // 梯度溢出，跳过更新
+                LOG_WARN("Gradient overflow detected, skipping optimizer step");
+            }
+            
+            // 6. 更新缩放因子
+            amp_scaler->update();
+        } else {
+            // 标准训练：使用原有方法
+            std::tie(loss_tensor, has_backward) = loss_compute.compute_loss_tensor(
+                out, batch.trg_y, static_cast<float>(batch.ntokens));
+        }
         
         GPUProfiler::end_timer("loss_compute");
         auto loss_end = steady_clock::now();
         double loss_time_ms = duration_cast<microseconds>(loss_end - loss_start).count() / 1000.0;
+        
+        // ✅ 阶段 2：记录反向传播完成事件（在 Stream 2 上）
+        if (device.is_cuda() && stream_manager && events_initialized) {
+            if (stream_manager->num_streams() >= 3) {
+                stream_manager->record_event(backward_event, 2);  // 在 Stream 2 上记录反向完成事件
+            } else {
+                // 如果只有 2 个 Stream，在 Stream 1 上记录
+                stream_manager->record_event(backward_event, 1);
+            }
+            // 同时记录 compute_event（用于兼容原有逻辑）
+            stream_manager->record_event(compute_event, (stream_manager->num_streams() >= 3) ? 2 : 1);
+        }
         
         // ✅ 延迟提取：累积 loss tensor，批量提取
         loss_tensor_buffer.push_back(loss_tensor);
@@ -615,6 +769,11 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         batch.src_mask = torch::Tensor();
         batch.trg_mask = torch::Tensor();
         
+    // ✅ 阶段 3：停止数据缓存（如果使用）
+    if (use_data_cache && data_cache && i == num_batches - 1) {
+        data_cache->stop();
+    }
+    
     // ✅ 优化：减少显存统计频率，避免频繁同步
     // 每 50 个 batch 或每个 bucket 结束时记录（减少同步操作）
     if (device.is_cuda() && ((i + 1) % 50 == 0 || (i + 1) % bucket_size == 0)) {
@@ -684,6 +843,13 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
     
     // ✅ 确保所有累积的 loss tensor 都已提取（防止遗漏）
     if (!loss_tensor_buffer.empty()) {
+        // ✅ 阶段 2：确保最后一个 batch 的所有操作完成（批量同步）
+        if (device.is_cuda() && stream_manager && events_initialized) {
+            // 同步所有 Stream 上的操作
+            backward_event.synchronize();  // 确保反向传播完成
+            compute_event.synchronize();   // 确保所有计算完成
+        }
+        
         for (size_t j = 0; j < loss_tensor_buffer.size(); ++j) {
             float loss_value = loss_tensor_buffer[j].item<float>();
             total_loss += loss_value * ntokens_buffer[j];
@@ -1066,4 +1232,5 @@ float evaluate(MTDataset& dataset,
     
     return bleu_score;
 }
+
 

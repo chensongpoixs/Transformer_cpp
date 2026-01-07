@@ -102,6 +102,27 @@ public:
     std::pair<torch::Tensor, bool> compute_loss_tensor(torch::Tensor out, 
                                                        torch::Tensor targets, 
                                                        float normalize);
+    
+    // ✅ 阶段 3：支持混合精度训练的方法
+    // 计算 loss 并执行反向传播（不执行优化器更新）
+    // 返回：归一化后的 loss tensor
+    torch::Tensor compute_loss_and_backward(torch::Tensor out, 
+                                            torch::Tensor targets, 
+                                            float normalize);
+    
+    // 执行优化器更新（在 unscale 之后调用）
+    void optimizer_step();
+    
+    // 获取 NoamOpt 优化器（用于学习率调度）
+    std::shared_ptr<NoamOpt> get_optimizer() { return opt; }
+    
+    // 获取底层 torch::optim::Optimizer（用于 AMP Scaler）
+    std::shared_ptr<torch::optim::Optimizer> get_base_optimizer() {
+        if (opt) {
+            return opt->get_optimizer();
+        }
+        return nullptr;
+    }
 
 private:
     Generator generator;

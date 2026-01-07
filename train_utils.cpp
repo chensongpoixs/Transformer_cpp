@@ -145,3 +145,35 @@ std::pair<torch::Tensor, bool> LossCompute::compute_loss_tensor(torch::Tensor ou
     return {normalized_loss, has_backward};
 }
 
+torch::Tensor LossCompute::compute_loss_and_backward(torch::Tensor out, 
+                                                     torch::Tensor targets, 
+                                                     float normalize) {
+    // 通过generator得到log概率
+    auto log_probs = generator->forward(out);  // [batch_size, seq_len, vocab_size]
+    
+    // 重塑为2D: [batch_size * seq_len, vocab_size] 和 [batch_size * seq_len]
+    auto log_probs_flat = log_probs.view({-1, log_probs.size(-1)});
+    auto targets_flat = targets.contiguous().view(-1);
+    
+    // 计算损失
+    auto loss = criterion(log_probs_flat, targets_flat);
+    
+    // 归一化 loss（不执行反向传播，由调用者处理）
+    auto normalized_loss = loss / normalize;
+    
+    // 显式释放中间张量
+    log_probs_flat = torch::Tensor();
+    targets_flat = torch::Tensor();
+    log_probs = torch::Tensor();
+    loss = torch::Tensor();
+    
+    // 返回归一化后的 loss tensor（未执行反向传播）
+    return normalized_loss;
+}
+
+void LossCompute::optimizer_step() {
+    if (opt != nullptr) {
+        opt->step();  // NoamOpt的step()已经包含了optimizer->step()和zero_grad()
+    }
+}
+

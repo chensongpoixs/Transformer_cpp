@@ -62,6 +62,8 @@ set(SOURCES
     train_utils.cpp
     data_loader.cpp
     multi_process_loader.cpp
+    data_cache.cpp
+    amp_scaler.cpp
     train.cpp
     tokenizer_wrapper.cpp
     cuda_stream_manager.cpp
@@ -75,6 +77,8 @@ set(SOURCES
 set(HEADERS
     config.h
     multi_process_loader.h
+    data_cache.h
+    amp_scaler.h
     embeddings.h
     attention.h
     layer_norm.h

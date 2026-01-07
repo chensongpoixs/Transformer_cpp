@@ -99,6 +99,12 @@ struct TransformerConfig {
     int prefetch_factor = 2;             // 每个 worker 预取的 batch 数量
     bool exist_ok = false;              // 如果实验目录已存在是否覆盖（类似 YOLOv5 的 --exist-ok）
     
+    // 阶段 3：数据缓存 + 混合精度训练
+    int cache_size = 2;                 // GPU 数据缓存大小（预加载的 batch 数量，默认 2）
+    bool use_amp = false;               // 是否使用混合精度训练（FP16，默认 false）
+    float amp_init_scale = 65536.0f;    // AMP 初始缩放因子（2^16，默认 65536）
+    int amp_scale_window = 2000;        // AMP 缩放窗口（每 N 次迭代更新一次缩放因子）
+    
     // 设备配置
     bool use_cuda = true;           // 是否使用CUDA
     int device_id = 0;              // GPU设备ID（或 "cpu"）

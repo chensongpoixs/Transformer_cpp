@@ -40,6 +40,8 @@
 #include "cuda_stream_manager.h"
 #include "logger.h"
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAFunctions.h>
+#include <cuda_runtime.h>
 
 CudaStreamManager::CudaStreamManager(torch::Device device, int num_streams)
     : device_(device) {
@@ -118,6 +120,31 @@ void CudaStreamManager::set_current_stream(int index) {
     if (streams_[index]) {
         // at::cuda::CUDAStream 提供 stream() 返回底层 c10::Stream
         c10::cuda::setCurrentCUDAStream(*streams_[index] );
+    }
+}
+
+void CudaStreamManager::wait_event_on_stream(const at::cuda::CUDAEvent& event, int stream_index) const {
+    if (!device_.is_cuda() || stream_index < 0 || stream_index >= static_cast<int>(streams_.size())) {
+        return;
+    }
+    
+    if (streams_[stream_index]) {
+        c10::cuda::CUDAGuard guard(device_);
+        
+        // 方法：使用 CUDA 原生 API cudaStreamWaitEvent
+        // 获取底层 CUDA stream 和 event
+        // at::cuda::CUDAStream 的 stream() 方法返回 c10::Stream
+        // c10::Stream 的 stream() 方法返回 cudaStream_t
+        cudaStream_t cuda_stream = streams_[stream_index]->stream();
+        //cudaStream_t cuda_stream = c10_stream.stream();
+        
+        // at::cuda::CUDAEvent 的 event() 方法返回 cudaEvent_t
+        cudaEvent_t cuda_event = event.event();
+        
+        // 使 Stream 等待 Event 完成（非阻塞，GPU 端等待）
+        // 参数：stream, event, flags (0 = 默认)
+        cudaStreamWaitEvent(cuda_stream, cuda_event, 0);
+        //event.block(*streams_[stream_index]);
     }
 }
 
