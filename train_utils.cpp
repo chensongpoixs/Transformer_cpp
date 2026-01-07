@@ -96,6 +96,21 @@ LossCompute::LossCompute(Generator generator,
 }
 
 float LossCompute::operator()(torch::Tensor out, torch::Tensor targets, float normalize) {
+    // 原有实现：立即提取 loss 值（保持向后兼容）
+    auto [loss_tensor, has_backward] = compute_loss_tensor(out, targets, normalize);
+    
+    // 提取损失值（强制同步）
+    float loss_value = loss_tensor.item<float>();
+    
+    // 显式释放 loss tensor
+    loss_tensor = torch::Tensor();
+    
+    return loss_value;
+}
+
+std::pair<torch::Tensor, bool> LossCompute::compute_loss_tensor(torch::Tensor out, 
+                                                                 torch::Tensor targets, 
+                                                                 float normalize) {
     // out: [batch_size, seq_len, vocab_size]
     // targets: [batch_size, seq_len]
     
@@ -106,25 +121,27 @@ float LossCompute::operator()(torch::Tensor out, torch::Tensor targets, float no
     auto log_probs_flat = log_probs.view({-1, log_probs.size(-1)});
     auto targets_flat = targets.contiguous().view(-1);
     
-    // 计算损失
+    // 计算损失（返回未归一化的 loss tensor）
     auto loss = criterion(log_probs_flat, targets_flat);
     
     // 如果提供了优化器，进行反向传播
+    bool has_backward = false;
     if (opt != nullptr) {
         loss.backward();
         opt->step();  // NoamOpt的step()已经包含了optimizer->step()和zero_grad()
+        has_backward = true;
     }
     
-    // 提取损失值（在反向传播后，计算图会自动释放）
-    float loss_value = loss.item<float>();
+    // 归一化 loss（但保持为 tensor，不提取值）
+    auto normalized_loss = loss / normalize;
     
     // 显式释放中间张量（帮助释放显存）
-    loss = torch::Tensor();
+    // 注意：不释放 loss，因为需要返回
     log_probs_flat = torch::Tensor();
     targets_flat = torch::Tensor();
     log_probs = torch::Tensor();
     
-    // 返回归一化后的损失
-    return loss_value / normalize;
+    // 返回归一化后的 loss tensor 和是否执行了反向传播
+    return {normalized_loss, has_backward};
 }
 

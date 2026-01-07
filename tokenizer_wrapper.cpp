@@ -47,6 +47,10 @@
 #include <sstream>
 #include <algorithm>
 #include <random>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <future>
 #include "logger.h"
 
 using namespace logging;
@@ -81,6 +85,9 @@ bool SentencePieceTokenizer::load(const std::string& model_path) {
         loaded_ = false;
         return false;
     }
+    
+    // 保存模型路径，用于多线程时创建新的 processor
+    model_path_ = model_path;
     
     // 从模型获取特殊token ID
     pad_id_ = processor_->pad_id();
@@ -119,6 +126,11 @@ std::vector<int> SentencePieceTokenizer::encode_as_ids(const std::string& text) 
     // 使用真正的SentencePiece库
     if (processor_) {
         std::vector<int> ids;
+        // ✅ 优化：预分配内存，减少重分配
+        // 估算：SentencePiece 通常每个 token 对应 1-4 个字符
+        // 保守估计：文本长度的 60% 作为初始容量
+        ids.reserve(std::max<size_t>(text.length() * 6 / 10, 10));
+        
         // SentencePiece的Encode方法返回void，通过引用参数返回结果
         processor_->Encode(text, &ids);
         return ids;
@@ -129,32 +141,142 @@ std::vector<int> SentencePieceTokenizer::encode_as_ids(const std::string& text) 
     return encode_simple(text);
 }
 
+#ifdef USE_SENTENCEPIECE
+// 辅助函数：为线程创建独立的 processor（线程安全）
+std::unique_ptr<sentencepiece::SentencePieceProcessor> SentencePieceTokenizer::create_thread_processor() const {
+    if (model_path_.empty() || !loaded_) {
+        return nullptr;
+    }
+    
+    auto thread_processor = std::make_unique<sentencepiece::SentencePieceProcessor>();
+    auto status = thread_processor->Load(model_path_);
+    if (!status.ok()) {
+        LOG_WARN(std::string("Failed to create thread processor: ") + status.ToString());
+        return nullptr;
+    }
+    return thread_processor;
+}
+#endif
+
 std::vector<std::vector<int>> SentencePieceTokenizer::encode_as_ids_batch(const std::vector<std::string>& texts) {
     std::vector<std::vector<int>> result;
     if (!loaded_) {
         return result;
     }
     
+    // 如果文本数量太少，使用单线程（避免线程创建开销）
+    const size_t MIN_BATCH_SIZE_FOR_PARALLEL = 4;
+    const size_t MAX_PARALLEL_THREADS = std::max<size_t>(std::thread::hardware_concurrency(), 1);
+    
 #ifdef USE_SENTENCEPIECE
-    // 使用真正的SentencePiece库：逐条调用 Encode，保持接口兼容性
+    // 使用真正的SentencePiece库
     if (processor_) {
-        result.reserve(texts.size());
-        for (const auto& t : texts) {
-            std::vector<int> ids;
-            auto status = processor_->Encode(t, &ids);
-            if (!status.ok()) {
-                LOG_WARN(std::string("SentencePiece 批量编码单条文本失败: ") + status.ToString());
-                result.emplace_back();  // 保持对齐，推入空结果
-            } else {
-                result.push_back(std::move(ids));
+        // ✅ 优化：预分配外层 vector 内存
+        result.resize(texts.size());  // 使用 resize 而不是 reserve，因为多线程需要按索引写入
+        
+        // ✅ 优化：估算平均 token 数，减少内存重分配
+        size_t avg_text_length = 0;
+        if (!texts.empty()) {
+            for (const auto& t : texts) {
+                avg_text_length += t.length();
             }
+            avg_text_length = avg_text_length / texts.size();
         }
-        return result;
+        size_t estimated_tokens_per_text = std::max<size_t>(avg_text_length * 6 / 10, 10);
+        
+        // ✅ 方案 1：多线程并行处理（如果文本数量足够）
+        if (texts.size() >= MIN_BATCH_SIZE_FOR_PARALLEL && MAX_PARALLEL_THREADS > 1) {
+            // 计算实际使用的线程数（不超过文本数量和 CPU 核心数）
+            size_t num_threads = std::min(texts.size(), MAX_PARALLEL_THREADS);
+            
+            // 每个线程处理的任务数
+            size_t chunk_size = (texts.size() + num_threads - 1) / num_threads;
+            
+            // 使用 std::thread 并行处理
+            std::vector<std::thread> threads;
+            threads.reserve(num_threads);
+            
+            for (size_t t = 0; t < num_threads; ++t) {
+                size_t start_idx = t * chunk_size;
+                size_t end_idx = std::min(start_idx + chunk_size, texts.size());
+                
+                if (start_idx >= texts.size()) {
+                    break;
+                }
+                
+                // 为每个线程创建独立的 processor（确保线程安全）
+                threads.emplace_back([this, &texts, &result, start_idx, end_idx, estimated_tokens_per_text]() {
+                    // 为当前线程创建独立的 processor
+                    auto thread_processor = create_thread_processor();
+                    if (!thread_processor) {
+                        // 如果创建失败，使用互斥锁保护共享 processor
+                        std::lock_guard<std::mutex> lock(processor_mutex_);
+                        for (size_t i = start_idx; i < end_idx; ++i) {
+                            std::vector<int> ids;
+                            ids.reserve(estimated_tokens_per_text);
+                            auto status = processor_->Encode(texts[i], &ids);
+                            if (!status.ok()) {
+                                result[i] = std::vector<int>();  // 空结果
+                            } else {
+                                result[i] = std::move(ids);
+                            }
+                        }
+                    } else {
+                        // 使用独立的 processor（无锁，更快）
+                        for (size_t i = start_idx; i < end_idx; ++i) {
+                            std::vector<int> ids;
+                            ids.reserve(estimated_tokens_per_text);
+                            auto status = thread_processor->Encode(texts[i], &ids);
+                            if (!status.ok()) {
+                                result[i] = std::vector<int>();  // 空结果
+                            } else {
+                                result[i] = std::move(ids);
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // 等待所有线程完成
+            for (auto& thread : threads) {
+                thread.join();
+            }
+            
+            return result;
+        } else {
+            // 单线程模式（文本数量太少或只有一个 CPU 核心）
+            result.reserve(texts.size());
+            
+            for (const auto& t : texts) {
+                std::vector<int> ids;
+                ids.reserve(estimated_tokens_per_text);
+                
+                auto status = processor_->Encode(t, &ids);
+                if (!status.ok()) {
+                    LOG_WARN(std::string("SentencePiece 批量编码单条文本失败: ") + status.ToString());
+                    result.emplace_back();  // 保持对齐，推入空结果
+                } else {
+                    result.push_back(std::move(ids));
+                }
+            }
+            return result;
+        }
     }
 #endif
     // 简化模式或未初始化 SentencePiece 时，逐条调用 encode_as_ids
     result.reserve(texts.size());
+    
+    // ✅ 优化：估算平均 token 数（简化模式下，字符级编码，1 字符 = 1 token）
+    size_t avg_text_length = 0;
+    if (!texts.empty()) {
+        for (const auto& t : texts) {
+            avg_text_length += t.length();
+        }
+        avg_text_length = avg_text_length / texts.size();
+    }
+    
     for (const auto& t : texts) {
+        // 简化模式下，直接使用文本长度作为 token 数估算
         result.push_back(encode_as_ids(t));
     }
     return result;

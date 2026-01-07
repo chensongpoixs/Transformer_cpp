@@ -381,6 +381,11 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
     float total_tokens = 0.0f;
     float total_loss = 0.0f;
     
+    // ✅ 方案 1：延迟 loss 提取 - 累积 loss tensor，批量提取
+    std::vector<torch::Tensor> loss_tensor_buffer;  // 累积 loss tensor
+    std::vector<float> ntokens_buffer;              // 对应的 token 数量
+    const size_t LOSS_EXTRACT_INTERVAL = 10;        // 每 10 个 batch 提取一次
+    
     // 基于句子长度的 bucket 采样策略
     // 1. 先按长度排序得到索引
     LOG_DEBUG("Start bucket sampling: dataset size = " + std::to_string(dataset.size()));
@@ -555,18 +560,49 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         // 计算损失（性能分析）
         auto loss_start = steady_clock::now();
         GPUProfiler::start_timer("loss_compute");
-        float loss = loss_compute(out, batch.trg_y, static_cast<float>(batch.ntokens));
+        
+        // ✅ 方案 1：延迟 loss 提取 - 返回 loss tensor，不立即提取
+        auto [loss_tensor, has_backward] = loss_compute.compute_loss_tensor(
+            out, batch.trg_y, static_cast<float>(batch.ntokens));
+        
         GPUProfiler::end_timer("loss_compute");
         auto loss_end = steady_clock::now();
         double loss_time_ms = duration_cast<microseconds>(loss_end - loss_start).count() / 1000.0;
         
-        // ✅ 优化：延迟 loss 提取，减少同步操作
-        // loss.item<float>() 已经在 loss_compute 内部调用，这里不需要再次同步
-        // 如果需要进一步优化，可以将 loss 提取移到循环外批量处理
+        // ✅ 延迟提取：累积 loss tensor，批量提取
+        loss_tensor_buffer.push_back(loss_tensor);
+        ntokens_buffer.push_back(static_cast<float>(batch.ntokens));
         
-        // 累加（batch 大小从 batch.src 的第 0 维获取，兼容预取路径）
-        total_loss += loss * batch.ntokens;
+        // 累加 token 数量（立即累加，用于统计）
         total_tokens += batch.ntokens;
+        
+        // 每 N 个 batch 或最后一个 batch 时，批量提取 loss 值
+        bool should_extract = ((i + 1) % LOSS_EXTRACT_INTERVAL == 0) || (i == num_batches - 1);
+        
+        float current_loss = 0.0f;  // 当前 batch 的 loss（用于显示）
+        if (should_extract && !loss_tensor_buffer.empty()) {
+            // 批量提取所有累积的 loss 值（减少同步次数）
+            for (size_t j = 0; j < loss_tensor_buffer.size(); ++j) {
+                float loss_value = loss_tensor_buffer[j].item<float>();  // 批量同步
+                total_loss += loss_value * ntokens_buffer[j];
+                
+                // 最后一个 loss 用于当前显示
+                if (j == loss_tensor_buffer.size() - 1) {
+                    current_loss = loss_value;
+                }
+                
+                // 释放 loss tensor
+                loss_tensor_buffer[j] = torch::Tensor();
+            }
+            loss_tensor_buffer.clear();
+            ntokens_buffer.clear();
+        } else {
+            // 如果不需要提取，使用估算值（基于历史平均值）
+            // 注意：这只是用于显示，实际累加会在批量提取时进行
+            float avg_loss_so_far = (total_tokens > 0.0f) ? (total_loss / total_tokens) : 0.0f;
+            current_loss = avg_loss_so_far;  // 使用平均值作为临时显示值
+        }
+        
         size_t current_batch_size = static_cast<size_t>(batch.src.size(0));
         processed_samples += current_batch_size;
         
@@ -636,7 +672,7 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         // 每 10 个 batch 或最后一个 batch 更新一次
         if (i % 10 == 0 || i == num_batches - 1) {
             print_progress_bar(epoch, total_epochs, i, num_batches,
-                              loss, avg_loss_so_far, speed, eta, is_training, device, elapsed_time,
+                              current_loss, avg_loss_so_far, speed, eta, is_training, device, elapsed_time,
                               static_cast<long long>(total_tokens), num_batches);
         }
         
@@ -644,6 +680,17 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         if (device.is_cuda() && (i + 1) % 50 == 0) {
            // torch::cuda::empty_cache();  // ✅ 启用：强制释放 CUDA 缓存
         }
+    }
+    
+    // ✅ 确保所有累积的 loss tensor 都已提取（防止遗漏）
+    if (!loss_tensor_buffer.empty()) {
+        for (size_t j = 0; j < loss_tensor_buffer.size(); ++j) {
+            float loss_value = loss_tensor_buffer[j].item<float>();
+            total_loss += loss_value * ntokens_buffer[j];
+            loss_tensor_buffer[j] = torch::Tensor();
+        }
+        loss_tensor_buffer.clear();
+        ntokens_buffer.clear();
     }
     
     

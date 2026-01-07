@@ -48,6 +48,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <mutex>
 
 // 如果定义了USE_SENTENCEPIECE，使用真正的SentencePiece库
 #ifdef USE_SENTENCEPIECE
@@ -118,10 +119,13 @@ private:
     int pad_id_ = 0;
     int bos_id_ = 2;
     int eos_id_ = 3;
+    std::string model_path_;  // 存储模型路径，用于多线程时创建新的 processor
     
 #ifdef USE_SENTENCEPIECE
     // 使用真正的SentencePiece处理器
     std::unique_ptr<sentencepiece::SentencePieceProcessor> processor_;
+    // 多线程保护：互斥锁（如果 processor 不是线程安全的）
+    mutable std::mutex processor_mutex_;
 #else
     // 简化模式：使用字符级编码
     void* processor_ = nullptr;
@@ -130,6 +134,11 @@ private:
     // 简化模式的编码/解码方法
     std::vector<int> encode_simple(const std::string& text);
     std::string decode_simple(const std::vector<int>& ids);
+    
+    // 多线程辅助函数：为线程创建独立的 processor（线程安全）
+#ifdef USE_SENTENCEPIECE
+    std::unique_ptr<sentencepiece::SentencePieceProcessor> create_thread_processor() const;
+#endif
 };
 
 /**

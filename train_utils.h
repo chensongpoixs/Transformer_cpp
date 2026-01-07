@@ -48,7 +48,7 @@
 #include <torch/torch.h>
 #include "transformer.h"
 #include <memory>
-
+#include <cstdbool>
 /**
  * Noam优化器
  * 实现学习率预热和衰减策略
@@ -94,7 +94,14 @@ public:
                 torch::nn::CrossEntropyLoss criterion,
                 std::shared_ptr<NoamOpt> opt = nullptr);
     
+    // 原有方法：立即提取 loss 值（保持向后兼容）
     float operator()(torch::Tensor out, torch::Tensor targets, float normalize);
+    
+    // ✅ 新增方法：返回 loss tensor，不立即提取（用于延迟提取优化）
+    // 返回：loss tensor（未归一化），以及是否执行了反向传播
+    std::pair<torch::Tensor, bool> compute_loss_tensor(torch::Tensor out, 
+                                                       torch::Tensor targets, 
+                                                       float normalize);
 
 private:
     Generator generator;
