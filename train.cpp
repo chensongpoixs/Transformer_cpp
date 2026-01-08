@@ -56,6 +56,7 @@
 #include "logger.h"
 #include "gpu_profiler.h"
 #include "cuda_stream_manager.h"
+#include "resource_manager.h"
 #include "json.hpp"
 #include <iomanip>
 #include <algorithm>
@@ -374,16 +375,19 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
                                                bool is_training,
                                                int epoch,
                                                int total_epochs) {
-    // CUDA Stream 管理器：用于可选的流水线并行（CPU 模式下为空）
+    // CUDA Stream 管理器：用于可选的流水线并行（根据配置决定是否启用）
     std::unique_ptr<CudaStreamManager> stream_manager;
-    if (device.is_cuda()) {
-        // ✅ 阶段 2：4 个 Stream 实现深度流水线
+    if (device.is_cuda() && config.use_cuda_stream) {
+        // ✅ 阶段 2：N 个 Stream 实现深度流水线（可配置）
         // Stream 0: 数据传输（Batch N+1）
         // Stream 1: 前向传播（Batch N）
         // Stream 2: 反向传播（Batch N）
-        // Stream 3: 数据传输（Batch N+2）
-        stream_manager = std::make_unique<CudaStreamManager>(device, 4);
-        LOG_INFO("Using 4 CUDA Streams for deep pipeline parallelism");
+        // Stream 3+: 额外的数据传输或计算流（如果 stream_count >= 4）
+        int stream_count = std::max(2, std::min(config.cuda_stream_count, 8));  // 限制在 2-8 之间
+        stream_manager = std::make_unique<CudaStreamManager>(device, stream_count);
+        LOG_INFO("Using " + std::to_string(stream_count) + " CUDA Streams for deep pipeline parallelism");
+    } else if (device.is_cuda() && !config.use_cuda_stream) {
+        LOG_INFO("CUDA Stream disabled, using default CUDA stream");
     }
 
     float total_tokens = 0.0f;
@@ -509,9 +513,10 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         }
     }
     
-    // ✅ 阶段 3：数据缓存（如果启用）
+    // ✅ 阶段 3：数据缓存（如果启用）- 使用 RAII 管理
     std::unique_ptr<DataCache> data_cache;
     bool use_data_cache = (config.cache_size > 0 && device.is_cuda());
+    DataCacheRAII data_cache_guard(nullptr);  // RAII 包装，确保 stop() 被调用
     
     // ✅ 使用多进程数据加载器（如果 workers > 0）
     std::unique_ptr<MultiProcessDataLoader> multi_loader;
@@ -521,8 +526,11 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         // 创建数据缓存（预加载多个 batch 到 GPU）
         data_cache = std::make_unique<DataCache>(config.cache_size, device);
         data_cache->start_prefetch(dataset, indices, batch_size, config);
+        // 使用 RAII 包装，确保在作用域结束时自动调用 stop()
+        data_cache_guard = DataCacheRAII(data_cache.get());
         LOG_INFO("Using GPU data cache: cache_size=" + std::to_string(config.cache_size));
-    } else if (use_multi_loader) {
+    } 
+    if (use_multi_loader) {
         // 创建多进程数据加载器
         multi_loader = std::make_unique<MultiProcessDataLoader>(
             dataset, indices, batch_size, device, config,
@@ -546,7 +554,9 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         double collate_time_ms = 0.0;
         
         // ✅ 阶段 3：优先使用数据缓存，其次多进程加载器，最后单线程加载
+        // 使用 RAII 确保 Batch 中的张量在作用域结束时自动释放
         Batch batch;
+        
         if (use_data_cache && data_cache) {
             auto collate_start = steady_clock::now();
             batch = data_cache->get_next();
@@ -574,6 +584,9 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
             batch = get_batch_for_index(i, batch_size, indices, dataset, device,
                                         config, stream_manager, collate_time_ms);
         }
+        
+        // 在 batch 赋值完成后创建 RAII guard，确保在循环结束时自动释放
+        BatchScopeGuard batch_guard(batch);  // RAII 保护，确保张量释放
         
         // ✅ 阶段 2：4 个 Stream 深度流水线 + Event 同步（业界标准）
         if (device.is_cuda() && stream_manager) {
@@ -761,18 +774,13 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
         processed_samples += current_batch_size;
         
         // ✅ 立即释放所有张量（关键修复：防止显存泄漏）
-        // 训练和验证阶段都需要释放，避免张量引用累积
+        // 使用 RAII：batch_guard 会在作用域结束时自动释放 Batch 中的张量
+        // 但为了及时释放，我们显式释放 out 张量
         out = torch::Tensor();
-        batch.src = torch::Tensor();
-        batch.trg = torch::Tensor();
-        batch.trg_y = torch::Tensor();
-        batch.src_mask = torch::Tensor();
-        batch.trg_mask = torch::Tensor();
+        // Batch 中的张量由 batch_guard 在作用域结束时自动释放
+        // 如果需要立即释放，可以调用 batch_guard.release()
         
-    // ✅ 阶段 3：停止数据缓存（如果使用）
-    if (use_data_cache && data_cache && i == num_batches - 1) {
-        data_cache->stop();
-    }
+        // 注意：data_cache_guard 会在函数返回时自动调用 stop()，无需手动调用
     
     // ✅ 优化：减少显存统计频率，避免频繁同步
     // 每 50 个 batch 或每个 bucket 结束时记录（减少同步操作）
@@ -860,28 +868,115 @@ std::tuple<float, long long, size_t> run_epoch(MTDataset& dataset,
     }
     
     
-    // 性能分析：在第一个epoch结束后打印
+    // ✅ 性能瓶颈诊断：在第一个epoch结束后打印详细分析
     if (epoch == 1 && is_training) {
         GPUProfiler::print_summary();
         GPUProfiler::check_gpu_utilization(device);
         
-        // ✅ 新增：打印 GPU 利用率诊断和建议
-        LOG_INFO("========== GPU Utilization Diagnosis ==========");
-        LOG_INFO("Note: If GPU utilization < 50%, possible reasons:");
-        LOG_INFO("  1. Data loading is the bottleneck (CPU too slow, GPU waiting)");
-        LOG_INFO("     - Fix: already optimized to batched non-blocking transfer");
-        LOG_INFO("     - Suggest: increase --workers to use multi-threaded loading");
-        LOG_INFO("  2. Batch size is too small to fully utilize GPU");
-        LOG_INFO("     - Fix: increase --batch-size (e.g., 64, 128)");
-        LOG_INFO("     - Current batch_size=" + std::to_string(config.batch_size));
-        LOG_INFO("  3. Too many synchronization operations");
-        LOG_INFO("     - Fix: memory stats frequency reduced (every 50 batches)");
-        LOG_INFO("     - Fix: progress updates reduced (every 10 batches)");
-        LOG_INFO("  4. Model is too small, computation not heavy enough");
-        LOG_INFO("     - Fix: increase model size (--d-model, --n-layers)");
-        LOG_INFO("     - Current d_model=" + std::to_string(config.d_model) + 
-                 ", n_layers=" + std::to_string(config.n_layers));
-        LOG_INFO("===============================================");
+        // 计算平均时间（从 GPUProfiler 获取）
+        auto collate_info = GPUProfiler::get_timing_info("collate_fn");
+        auto forward_info = GPUProfiler::get_timing_info("forward");
+        auto loss_info = GPUProfiler::get_timing_info("loss_compute");
+        
+        double avg_collate = (collate_info.count > 0) ? (collate_info.total_time_ms / collate_info.count) : 0.0;
+        double avg_forward = (forward_info.count > 0) ? (forward_info.total_time_ms / forward_info.count) : 0.0;
+        double avg_loss = (loss_info.count > 0) ? (loss_info.total_time_ms / loss_info.count) : 0.0;
+        int collate_count = collate_info.count;
+        int forward_count = forward_info.count;
+        int loss_count = loss_info.count;
+        
+        // 估算总 batch 时间（假设其他时间为 10%）
+        double estimated_total = (avg_collate + avg_forward + avg_loss) / 0.9;
+        double collate_ratio = (estimated_total > 0) ? (avg_collate / estimated_total * 100.0) : 0.0;
+        double compute_ratio = (estimated_total > 0) ? ((avg_forward + avg_loss) / estimated_total * 100.0) : 0.0;
+        double other_ratio = 100.0 - collate_ratio - compute_ratio;
+        
+        // ✅ 详细性能瓶颈诊断
+        LOG_INFO("========== Performance Bottleneck Diagnosis ==========");
+        LOG_INFO("Time Distribution (from GPUProfiler):");
+        LOG_INFO("  Data loading (collate_fn): " + std::to_string(collate_ratio) + "% (" + 
+                 std::to_string(avg_collate) + " ms, " + std::to_string(collate_count) + " calls)");
+        LOG_INFO("  GPU computation (forward+loss): " + std::to_string(compute_ratio) + "% (" + 
+                 std::to_string(avg_forward + avg_loss) + " ms)");
+        LOG_INFO("  Other (sync/wait/overhead): " + std::to_string(other_ratio) + "%");
+        LOG_INFO("");
+        
+        // 识别瓶颈并给出建议
+        bool has_bottleneck = false;
+        
+        if (collate_ratio > 50.0) {
+            has_bottleneck = true;
+            LOG_WARN("🔴 BOTTLENECK: Data loading is the bottleneck!");
+            LOG_INFO("  Current configuration:");
+            LOG_INFO("    --workers: " + std::to_string(config.workers) + 
+                     (config.workers == 0 ? " (single-threaded)" : " (multi-threaded)"));
+            LOG_INFO("    --pin-memory: " + std::string(config.pin_memory ? "true" : "false"));
+            LOG_INFO("    --prefetch-factor: " + std::to_string(config.prefetch_factor));
+            LOG_INFO("    --cache-size: " + std::to_string(config.cache_size));
+            LOG_INFO("  Recommendations:");
+            if (config.workers == 0) {
+                LOG_INFO("    1. ⭐ Enable multi-process loading: --workers 8");
+            }
+            if (config.cache_size == 0) {
+                LOG_INFO("    2. ⭐ Enable GPU data cache: --cache-size 2");
+            }
+            if (!config.pin_memory) {
+                LOG_INFO("    3. ⭐ Enable pin_memory: --pin-memory true");
+            }
+            if (config.prefetch_factor < 2) {
+                LOG_INFO("    4. ⭐ Increase prefetch: --prefetch-factor 4");
+            }
+            LOG_INFO("");
+        }
+        
+        if (compute_ratio < 30.0) {
+            has_bottleneck = true;
+            LOG_WARN("🔴 BOTTLENECK: GPU computation time is too low!");
+            LOG_INFO("  Current configuration:");
+            LOG_INFO("    --batch-size: " + std::to_string(config.batch_size));
+            LOG_INFO("    --d-model: " + std::to_string(config.d_model));
+            LOG_INFO("    --n-layers: " + std::to_string(config.n_layers));
+            LOG_INFO("    --use-cuda-stream: " + std::string(config.use_cuda_stream ? "true" : "false"));
+            LOG_INFO("  Recommendations:");
+            if (config.batch_size < 64) {
+                LOG_INFO("    1. ⭐ Increase batch size: --batch-size 64 (or 128)");
+            }
+            if (!config.use_cuda_stream) {
+                LOG_INFO("    2. ⭐ Enable CUDA Stream: --use-cuda-stream true");
+            }
+            if (config.d_model < 512 || config.n_layers < 6) {
+                LOG_INFO("    3. Consider increasing model size: --d-model 512 --n-layers 6");
+            }
+            LOG_INFO("");
+        }
+        
+        if (other_ratio > 20.0) {
+            has_bottleneck = true;
+            LOG_WARN("🟠 WARNING: High synchronization/wait time!");
+            LOG_INFO("  Recommendations:");
+            LOG_INFO("    1. ⭐ Enable CUDA Stream: --use-cuda-stream true");
+            LOG_INFO("    2. Loss extraction is already optimized (every 10 batches)");
+            LOG_INFO("    3. Memory stats frequency is already optimized (every 50 batches)");
+            LOG_INFO("");
+        }
+        
+        // GPU 利用率估算
+        double estimated_gpu_util = compute_ratio;
+        if (estimated_gpu_util < 30.0) {
+            LOG_WARN("🔴 GPU utilization is very low: " + std::to_string(estimated_gpu_util) + "%");
+        } else if (estimated_gpu_util < 60.0) {
+            LOG_WARN("🟠 GPU utilization is moderate: " + std::to_string(estimated_gpu_util) + "%");
+        } else {
+            LOG_INFO("✅ GPU utilization is good: " + std::to_string(estimated_gpu_util) + "%");
+        }
+        
+        if (!has_bottleneck) {
+            LOG_INFO("✅ No major bottlenecks detected. Performance looks good!");
+        }
+        
+        LOG_INFO("=====================================================");
+        LOG_INFO("For detailed analysis, see: PERFORMANCE_BOTTLENECK_ANALYSIS.md");
+        LOG_INFO("=====================================================");
     }
     
     // epoch结束后清理CUDA缓存（使用 CUDACachingAllocator::emptyCache 替代 torch::cuda::empty_cache）

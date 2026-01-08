@@ -95,6 +95,15 @@ void GPUProfiler::reset() {
     timings_.clear();
 }
 
+GPUProfiler::TimingInfo GPUProfiler::get_timing_info(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = timings_.find(name);
+    if (it != timings_.end()) {
+        return it->second;
+    }
+    return TimingInfo();  // 返回默认值（count=0）
+}
+
 void GPUProfiler::print_summary() {
     std::lock_guard<std::mutex> lock(mutex_);
     

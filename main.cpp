@@ -152,6 +152,28 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
             if (auto v = next(i)) config.tokenizer_eng = v;
         } else if (arg == "--tokenizer-chn") {
             if (auto v = next(i)) config.tokenizer_chn = v;
+        } else if (arg == "--use-cuda-stream") {
+            if (auto v = next(i)) {
+                std::string val = v;
+                config.use_cuda_stream = (val == "true" || val == "1" || val == "yes");
+            } else {
+                config.use_cuda_stream = true;  // 默认启用
+            }
+        } else if (arg == "--cuda-stream-count") {
+            if (auto v = next(i)) config.cuda_stream_count = std::stoi(v);
+        } else if (arg == "--cache-size") {
+            if (auto v = next(i)) config.cache_size = std::stoi(v);
+        } else if (arg == "--use-amp") {
+            if (auto v = next(i)) {
+                std::string val = v;
+                config.use_amp = (val == "true" || val == "1" || val == "yes");
+            } else {
+                config.use_amp = true;  // 默认启用
+            }
+        } else if (arg == "--amp-init-scale") {
+            if (auto v = next(i)) config.amp_init_scale = std::stof(v);
+        } else if (arg == "--amp-scale-window") {
+            if (auto v = next(i)) config.amp_scale_window = std::stoi(v);
         } else if (arg == "--help" || arg == "-h") {
             show_help = true;
         } else {
@@ -170,6 +192,8 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
         LOG_INFO("  --epochs <int>             Number of epochs (default: " + std::to_string(config.epoch_num) + ")");
         LOG_INFO("  --lr <float>               Learning rate (default: " + std::to_string(config.lr) + ")");
         LOG_INFO("  --workers <int>            Number of data loading workers (default: " + std::to_string(config.workers) + ", 0=single thread)");
+        LOG_INFO("  --pin-memory <bool>         Enable pinned memory for faster CPU->GPU transfer (default: true)");
+        LOG_INFO("  --prefetch-factor <int>     Prefetch factor for data loader (default: " + std::to_string(config.prefetch_factor) + ")");
         LOG_INFO("");
         LOG_INFO("Model:");
         LOG_INFO("  --d-model <int>            Model dimension (default: " + std::to_string(config.d_model) + ")");
@@ -188,6 +212,14 @@ static bool parse_args(int argc, char* argv[], TransformerConfig& config) {
         LOG_INFO("  --tokenizer-dir <path>      Tokenizer directory (default: " + config.tokenizer_dir + ")");
         LOG_INFO("  --tokenizer-eng <path>      English tokenizer model path (default: " + config.tokenizer_eng + ")");
         LOG_INFO("  --tokenizer-chn <path>      Chinese tokenizer model path (default: " + config.tokenizer_chn + ")");
+        LOG_INFO("");
+        LOG_INFO("CUDA Optimization:");
+        LOG_INFO("  --use-cuda-stream <bool>    Enable CUDA Stream for pipeline parallelism (default: true)");
+        LOG_INFO("  --cuda-stream-count <int>   Number of CUDA Streams (default: " + std::to_string(config.cuda_stream_count) + ", range: 2-8)");
+        LOG_INFO("  --cache-size <int>          GPU data cache size (number of batches to prefetch, default: " + std::to_string(config.cache_size) + ", 0=disabled)");
+        LOG_INFO("  --use-amp <bool>            Enable mixed precision training (FP16, default: false)");
+        LOG_INFO("  --amp-init-scale <float>    AMP initial scale factor (default: " + std::to_string(config.amp_init_scale) + ")");
+        LOG_INFO("  --amp-scale-window <int>    AMP scale update window (default: " + std::to_string(config.amp_scale_window) + ")");
         LOG_INFO("");
         LOG_INFO("Other:");
         LOG_INFO("  --device <int|cpu>         Device (default: " + std::to_string(config.device_id) + ", or 'cpu')");

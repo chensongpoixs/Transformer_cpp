@@ -105,6 +105,10 @@ struct TransformerConfig {
     float amp_init_scale = 65536.0f;    // AMP 初始缩放因子（2^16，默认 65536）
     int amp_scale_window = 2000;        // AMP 缩放窗口（每 N 次迭代更新一次缩放因子）
     
+    // CUDA Stream 配置
+    bool use_cuda_stream = true;        // 是否使用 CUDA Stream 进行流水线并行（默认 true）
+    int cuda_stream_count = 4;          // CUDA Stream 数量（默认 4，用于深度流水线）
+    
     // 设备配置
     bool use_cuda = true;           // 是否使用CUDA
     int device_id = 0;              // GPU设备ID（或 "cpu"）

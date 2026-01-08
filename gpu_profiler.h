@@ -71,6 +71,9 @@ public:
     static void reset();
     static void print_summary();
     
+    // 获取指定操作的统计信息（用于性能诊断）
+    static TimingInfo get_timing_info(const std::string& name);
+    
     // GPU利用率检查
     static void check_gpu_utilization(torch::Device device);
     

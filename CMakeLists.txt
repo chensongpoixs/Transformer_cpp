@@ -75,6 +75,7 @@ set(SOURCES
 
 # 头文件列表
 set(HEADERS
+    resource_manager.h
     config.h
     multi_process_loader.h
     data_cache.h
